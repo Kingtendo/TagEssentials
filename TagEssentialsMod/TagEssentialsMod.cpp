@@ -8879,8 +8879,9 @@ bool ReadClassConstantPoolUtf8(
     return true;
 }
 
-bool FindClassInterfaceMethodRefs(
+bool FindClassMethodRefs(
     const std::vector<unsigned char>& bytes,
+    unsigned char referenceTag,
     const char* targetName,
     const char* targetDescriptor,
     std::vector<uint16_t>& refs) {
@@ -8951,7 +8952,7 @@ bool FindClassInterfaceMethodRefs(
     }
 
     for (uint16_t i = 1; i < constantPoolCount; ++i) {
-        if (tags[(size_t)i] != 11) continue;
+        if (tags[(size_t)i] != referenceTag) continue;
         uint16_t nameAndType = second[(size_t)i];
         if (nameAndType == 0 || nameAndType >= constantPoolCount ||
             tags[(size_t)nameAndType] != 12) continue;
@@ -8964,6 +8965,14 @@ bool FindClassInterfaceMethodRefs(
         }
     }
     return !refs.empty();
+}
+
+bool FindClassInterfaceMethodRefs(
+    const std::vector<unsigned char>& bytes,
+    const char* targetName,
+    const char* targetDescriptor,
+    std::vector<uint16_t>& refs) {
+    return FindClassMethodRefs(bytes, 11, targetName, targetDescriptor, refs);
 }
 
 std::vector<unsigned char> BuildMutedVoicePacketFilterHelperClassBytes() {
@@ -13164,8 +13173,16 @@ bool PatchPublicWinsLivingRendererNameRead(
         : nullptr;
     const std::string targetMethodName = mappedMethodName ? mappedMethodName : "b";
     const std::string targetDescriptor = TranslateLunarDescriptor("(Lpr;DDD)V");
+    const bool lunarClient = IsLunarNamedClient();
     const std::string dispatchDescriptor = TranslateLunarDescriptor(
-        IsLunarNamedClient() ? "(Lpr;Leu;)Ljava/lang/String;" : "(Leu;)Ljava/lang/String;");
+        lunarClient ? "(Lpr;Leu;)Ljava/lang/String;" : "(Lpr;)Ljava/lang/String;");
+    std::vector<uint16_t> cachedFormattedNameRefs;
+    if (!lunarClient && !FindClassMethodRefs(
+            originalBytes, 10, "getCachedFormattedName", "()Ljava/lang/String;",
+            cachedFormattedNameRefs)) {
+        DebugLog("Public wins rendered-name hook could not resolve pr.getCachedFormattedName call");
+        return false;
+    }
     size_t cpOffset = 0;
     uint16_t constantPoolCount = 0;
     std::vector<std::string> utf8Constants;
@@ -13175,9 +13192,11 @@ bool PatchPublicWinsLivingRendererNameRead(
     std::vector<unsigned char> cpAdditions;
     uint16_t nextIndex = constantPoolCount;
     uint16_t helperNameUtf8 = AppendClassUtf8Cp(
-        cpAdditions, nextIndex, "TntTagRenderedComponentHookV6");
+        cpAdditions, nextIndex,
+        lunarClient ? "TntTagRenderedComponentHookV6" : "TntTagRenderedNameHookV4");
     uint16_t helperClass = AppendClassClassCp(cpAdditions, nextIndex, helperNameUtf8);
-    uint16_t dispatchNameUtf8 = AppendClassUtf8Cp(cpAdditions, nextIndex, "f");
+    uint16_t dispatchNameUtf8 = AppendClassUtf8Cp(
+        cpAdditions, nextIndex, lunarClient ? "f" : "e");
     uint16_t dispatchDescUtf8 = AppendClassUtf8Cp(
         cpAdditions, nextIndex, dispatchDescriptor.c_str());
     uint16_t dispatchNameAndType = AppendClassNameAndTypeCp(
@@ -13243,38 +13262,50 @@ bool PatchPublicWinsLivingRendererNameRead(
                 !ReadClassU4(patchedBytes, codeOffset, codeLength) ||
                 codeOffset + codeLength > patchedBytes.size()) return false;
 
-            for (uint32_t codeIndex = 0; codeIndex + 10 < codeLength; ++codeIndex) {
+            for (uint32_t codeIndex = 0; codeIndex + 4 < codeLength; ++codeIndex) {
                 size_t p = codeOffset + codeIndex;
+                if (!lunarClient && patchedBytes[p] == 0xB6) {
+                    uint16_t methodRef = (uint16_t)(
+                        ((uint16_t)patchedBytes[p + 1] << 8) | patchedBytes[p + 2]);
+                    if (std::find(cachedFormattedNameRefs.begin(), cachedFormattedNameRefs.end(), methodRef) ==
+                        cachedFormattedNameRefs.end()) {
+                        continue;
+                    }
+
+                    // Badlion already has the player on the stack for
+                    // getCachedFormattedName(). Redirect that call to the
+                    // player-aware native decorator and preserve the following
+                    // nickname-filter call.
+                    patchedBytes[p] = 0xB8;
+                    patchedBytes[p + 1] = (unsigned char)((dispatchMethodRef >> 8) & 0xFF);
+                    patchedBytes[p + 2] = (unsigned char)(dispatchMethodRef & 0xFF);
+                    DebugLog("Public wins rendered-name hook patched Badlion cached name offset=%u",
+                        (unsigned int)codeIndex);
+                    return true;
+                }
+
+                if (!lunarClient) continue;
                 if (patchedBytes[p] != 0xB9 ||
                     patchedBytes[p + 3] != 0x01 ||
                     patchedBytes[p + 4] != 0x00) continue;
 
-                if (IsLunarNamedClient()) {
-                    // Stack starts with the IChatComponent. Add method-local entity
-                    // argument 1, swap to (entity, component), then call the helper.
-                    patchedBytes[p] = 0x2B; // aload_1
-                    patchedBytes[p + 1] = 0x5F; // swap
-                    patchedBytes[p + 2] = 0xB8; // invokestatic helper.f(entity, component)
-                    patchedBytes[p + 3] = (unsigned char)((dispatchMethodRef >> 8) & 0xFF);
-                    patchedBytes[p + 4] = (unsigned char)(dispatchMethodRef & 0xFF);
-                }
-                else {
-                    patchedBytes[p] = 0xB8; // invokestatic helper.f(component)
-                    patchedBytes[p + 1] = (unsigned char)((dispatchMethodRef >> 8) & 0xFF);
-                    patchedBytes[p + 2] = (unsigned char)(dispatchMethodRef & 0xFF);
-                    patchedBytes[p + 3] = 0x00;
-                    patchedBytes[p + 4] = 0x00;
-                }
+                // Stack starts with the IChatComponent. Add method-local entity
+                // argument 1, swap to (entity, component), then call the helper.
+                patchedBytes[p] = 0x2B; // aload_1
+                patchedBytes[p + 1] = 0x5F; // swap
+                patchedBytes[p + 2] = 0xB8; // invokestatic helper.f(entity, component)
+                patchedBytes[p + 3] = (unsigned char)((dispatchMethodRef >> 8) & 0xFF);
+                patchedBytes[p + 4] = (unsigned char)(dispatchMethodRef & 0xFF);
                 DebugLog("Public wins rendered-component hook patched bjl.b invokeinterface offset=%u",
                     (unsigned int)codeIndex);
                 return true;
             }
-            DebugLog("Public wins rendered-component hook candidate %s had no formatted-text call",
+            DebugLog("Public wins rendered-name hook candidate %s had no supported name call",
                 methodName.c_str());
         }
     }
     DebugLog(foundCandidateMethod
-        ? "Public wins rendered-component hook exhausted candidates without formatted-text call"
+        ? "Public wins rendered-name hook exhausted candidates without supported name call"
         : "Public wins rendered-name hook failed to find bjl.b(Lpr;DDD)V");
     return false;
 }
@@ -13435,7 +13466,9 @@ bool EnsurePublicWinsRenderedNameHook(JNIEnv* env) {
         return false;
     }
 
-    bool hookReady = EnsurePublicWinsRenderedComponentHelper(env);
+    bool hookReady = IsLunarNamedClient()
+        ? EnsurePublicWinsRenderedComponentHelper(env)
+        : EnsurePublicWinsRenderedNameHelper(env);
     if (hookReady && IsLunarNamedClient()) {
         hookReady = EnsureLunarAdventureNameHelper(env);
     }
