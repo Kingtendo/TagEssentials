@@ -499,6 +499,7 @@ float g_speed3Volume = 1.0f;
 float g_slownessVolume = 1.0f;
 bool g_guiPublicWinsEnabled = false;
 int  g_guiPublicWinsPosition = PUBLIC_WINS_POSITION_PREFIX;
+bool g_guiPublicWinsSpaceBetweenUsername = false;
 
 
 // Add these:
@@ -521,6 +522,7 @@ bool g_roundTimerObserved = false;
 ULONGLONG g_betweenRoundsStartedAtMs = 0;
 ULONGLONG g_lastRoundTimerSeenMs = 0;
 volatile LONG g_tntTagGameActive = 0;
+volatile LONG g_hypixelTntTagGameActive = 0;
 ULONGLONG g_lastTntTagContextSeenMs = 0;
 ULONGLONG g_lastHypixelTntTagContextSeenMs = 0;
 ULONGLONG g_lastPublicWinsPrefetchMs = 0;
@@ -1706,7 +1708,7 @@ void SetPublicWinsEnabled(bool enabled) {
 
 void QueuePublicWinsLookup(const std::string& uuidValue, const std::string& playerName) {
     if (InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) == 0 ||
-        InterlockedCompareExchange(&g_tntTagGameActive, 0, 0) == 0 ||
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0 ||
         InterlockedCompareExchange(&g_publicWinsWorkerRunning, 0, 0) == 0 ||
         InterlockedCompareExchange(&g_publicWinsForbidden, 0, 0) != 0 ||
         !IsSafeMinecraftUsername(playerName)) return;
@@ -1733,7 +1735,7 @@ void QueuePublicWinsLookup(const std::string& uuidValue, const std::string& play
 bool GetPublicWinsCached(const std::string& uuidValue, const std::string& playerName, unsigned long long& wins) {
     wins = 0;
     if (InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) == 0 ||
-        InterlockedCompareExchange(&g_tntTagGameActive, 0, 0) == 0) return false;
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0) return false;
     std::string uuid = NormalizePublicWinsUuid(uuidValue);
     if (uuid.empty()) return false;
 
@@ -1749,7 +1751,7 @@ bool GetPublicWinsCachedByPlayerName(const std::string& playerName, unsigned lon
     wins = 0;
     if (playerName.empty() ||
         InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) == 0 ||
-        InterlockedCompareExchange(&g_tntTagGameActive, 0, 0) == 0) return false;
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0) return false;
 
     std::lock_guard<std::mutex> lock(g_publicWinsMutex);
     const PublicWinsCacheEntry* newest = nullptr;
@@ -2898,6 +2900,7 @@ void SaveToolSettings() {
     f << "slowness_volume " << g_slownessVolume << "\n";
     f << "public_helpers_wins_enabled " << (g_guiPublicWinsEnabled ? 1 : 0) << "\n";
     f << "public_helpers_wins_position " << g_guiPublicWinsPosition << "\n";
+    f << "public_helpers_wins_space_between_username " << (g_guiPublicWinsSpaceBetweenUsername ? 1 : 0) << "\n";
     f << "extras_force_wheat_stage1 " << (g_guiExtrasForceWheatStage1 ? 1 : 0) << "\n";
     f << "extras_hide_beacon_beams " << (g_guiExtrasHideBeaconBeams ? 1 : 0) << "\n";
     f << "extras_disable_tag_scoreboard " << (g_guiExtrasDisableTagScoreboard ? 1 : 0) << "\n";
@@ -3005,6 +3008,10 @@ void LoadToolSettings() {
             int value = PUBLIC_WINS_POSITION_PREFIX;
             if (f >> value) g_guiPublicWinsPosition = value == PUBLIC_WINS_POSITION_SUFFIX
                 ? PUBLIC_WINS_POSITION_SUFFIX : PUBLIC_WINS_POSITION_PREFIX;
+        }
+        else if (key == "public_helpers_wins_space_between_username") {
+            int value = 0;
+            if (f >> value) g_guiPublicWinsSpaceBetweenUsername = value != 0;
         }
         else if (key == "extras_force_wheat_stage1") {
             int value = 0;
@@ -5451,7 +5458,7 @@ void BuildWorldPlayerUuidByName(jobject world, std::unordered_map<std::string, s
 void QueuePublicWinsForWorldPlayers() {
     if (!g_env || !InitScoreboardJNI() ||
         InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) == 0 ||
-        InterlockedCompareExchange(&g_tntTagGameActive, 0, 0) == 0) return;
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0) return;
 
     jobjectArray playerArray = GetNetworkPlayerInfoArray();
     if (!playerArray || g_env->ExceptionCheck()) {
@@ -10404,9 +10411,13 @@ std::string DecorateNameWithPublicWins(
     // the name before either render hook sees it. Keep both paths safe to use
     // together without rendering the same wins value twice.
     if (formatted.find(label) != std::string::npos) return formatted;
-    size_t insertAt = g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX ? end : start;
+    const bool suffix = g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX;
+    size_t insertAt = suffix ? end : start;
     MinecraftFormatState state = GetMinecraftFormatStateBefore(formatted, insertAt);
-    std::string insertion = label + RestoreMinecraftFormatState(state);
+    const std::string separator = g_guiPublicWinsSpaceBetweenUsername ? " " : "";
+    std::string insertion = suffix
+        ? separator + label + RestoreMinecraftFormatState(state)
+        : label + RestoreMinecraftFormatState(state) + separator;
     std::string result = formatted;
     result.insert(insertAt, insertion);
     return result;
@@ -10414,6 +10425,10 @@ std::string DecorateNameWithPublicWins(
 
 std::string DecorateApiTabTextWithPublicWins(const std::string& formatted, bool& matchedPlayer) {
     matchedPlayer = false;
+    if (InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) == 0 ||
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0) {
+        return formatted;
+    }
     std::string bestName;
     unsigned long long bestWins = 0;
     unsigned long long bestFetchedEpochMs = 0;
@@ -10776,12 +10791,13 @@ void ApplyPublicWinsToPlayerTeams(bool enablePublicWins) {
         std::string desiredBaseSuffix = stateIt->second.baseSuffix;
         std::string label = MakePublicWinsLabel(wins);
         if (g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX) {
-            desiredBaseSuffix = label + desiredBaseSuffix;
+            desiredBaseSuffix = (g_guiPublicWinsSpaceBetweenUsername ? " " : "") + label + desiredBaseSuffix;
         }
         else {
             MinecraftFormatState formatState = GetMinecraftFormatStateBefore(
                 compositionPrefix, compositionPrefix.size());
-            desiredPrefix = compositionPrefix + label + RestoreMinecraftFormatState(formatState);
+            desiredPrefix = compositionPrefix + label + RestoreMinecraftFormatState(formatState) +
+                (g_guiPublicWinsSpaceBetweenUsername ? " " : "");
         }
 
         bool timerOnNametag = g_guiTimerNametagEnabled && g_timerActive && !g_betweenRoundsTimerActive;
@@ -11140,7 +11156,7 @@ jstring JNICALL NameTagHookDispatch(JNIEnv* env, jclass, jobject player, jstring
     if (!env || !displayName) return displayName;
     LONG dispatchNumber = InterlockedIncrement(&g_publicWinsNameTagDispatchCount);
     bool publicWinsEnabled = InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) != 0 &&
-        InterlockedCompareExchange(&g_tntTagGameActive, 0, 0) != 0;
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) != 0;
     if (!publicWinsEnabled) {
         if (dispatchNumber <= 5) DebugLog("Public wins nametag dispatch=%ld inactive", dispatchNumber);
         return displayName;
@@ -11195,7 +11211,7 @@ jstring JNICALL PublicWinsTabNameHookDispatch(JNIEnv* env, jclass, jobject netwo
     bool cacheHit = false;
 
     if (InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) != 0 &&
-        InterlockedCompareExchange(&g_tntTagGameActive, 0, 0) != 0 && IsUuidLookupId(identity.uuid)) {
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) != 0 && IsUuidLookupId(identity.uuid)) {
         QueuePublicWinsLookup(identity.uuid, identity.name);
         unsigned long long wins = 0;
         if (GetPublicWinsCached(identity.uuid, identity.name, wins)) {
@@ -11221,7 +11237,7 @@ jstring JNICALL PublicWinsApiTabTextHookDispatch(JNIEnv* env, jclass, jstring di
     std::string currentText = JStringToUtf8(env, displayText);
     if (currentText.empty() ||
         InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) == 0 ||
-        InterlockedCompareExchange(&g_tntTagGameActive, 0, 0) == 0) {
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0) {
         if (dispatchNumber <= 5) {
             DebugLog("Public wins API tab dispatch=%ld inactiveOrEmpty=%d",
                 dispatchNumber, currentText.empty() ? 1 : 0);
@@ -17561,6 +17577,7 @@ static RECT g_publicHelpersExpandRect = {};
 static RECT g_publicWinsToggleRect = {};
 static RECT g_publicWinsPrefixRect = {};
 static RECT g_publicWinsSuffixRect = {};
+static RECT g_publicWinsSpaceRect = {};
 static RECT g_extrasCard = {};
 static RECT g_extrasExpandRect = {};
 static RECT g_extrasWheatToggleRect = {};
@@ -17804,7 +17821,7 @@ constexpr int kGuiCardGap = 14;
 constexpr int kGuiPerspectiveExpandedHeight = 128;
 constexpr int kGuiTimerExpandedHeight = 364;
 constexpr int kGuiSpeedExpandedHeight = 206;
-constexpr int kGuiPublicHelpersExpandedHeight = 144;
+constexpr int kGuiPublicHelpersExpandedHeight = 180;
 constexpr int kGuiExtrasExpandedHeight = 174;
 constexpr int kGuiMutedUtilitiesExpandedHeight = 380;
 constexpr int kGuiSoundPickerRowHeight = 48;
@@ -19382,6 +19399,7 @@ void LayoutGuiControls(int clientW, int clientH) {
         g_publicWinsPrefixRect = MakeRectWH(positionX, g_publicHelpersCard.top + 102, positionW, 30);
         g_publicWinsSuffixRect = MakeRectWH(g_publicWinsPrefixRect.right + segGap, g_publicHelpersCard.top + 102, positionW, 30);
     }
+    g_publicWinsSpaceRect = MakeRectWH(g_publicHelpersCard.right - 40, g_publicHelpersCard.top + 145, 22, 22);
 
     y += publicHelpersHeight + kGuiCardGap;
 
@@ -20122,6 +20140,23 @@ void DrawToggleSwitch(HDC hdc, const RECT& rect, bool enabled, bool available = 
     DeleteObject(knobBrush);
 }
 
+void DrawCheckbox(HDC hdc, const RECT& rect, bool checked) {
+    const GuiPalette& palette = GetGuiPalette();
+    FillRoundedRect(hdc, rect,
+        checked ? kGuiAccent : kGuiButton,
+        checked ? palette.activeBorder : kGuiButtonBorder,
+        6);
+    if (!checked) return;
+
+    HPEN checkPen = CreatePen(PS_SOLID, 2, palette.knob);
+    HGDIOBJ oldPen = SelectObject(hdc, checkPen);
+    MoveToEx(hdc, rect.left + 5, rect.top + 11, nullptr);
+    LineTo(hdc, rect.left + 9, rect.top + 15);
+    LineTo(hdc, rect.right - 4, rect.top + 6);
+    SelectObject(hdc, oldPen);
+    DeleteObject(checkPen);
+}
+
 void DrawButtonChip(HDC hdc, const RECT& rect, const std::string& text, bool active, bool accent) {
     const GuiPalette& palette = GetGuiPalette();
     COLORREF fill = active
@@ -20765,6 +20800,13 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 DrawButtonChip(memDC, g_publicWinsSuffixRect, "Suffix",
                     g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX, true);
 
+                SelectObject(memDC, bodyFont);
+                DrawTextLine(memDC, MakeRectWH(g_publicHelpersCard.left + 18, g_publicWinsSpaceRect.top + 1,
+                    g_publicHelpersCard.right - g_publicHelpersCard.left - 82, 20),
+                    "Space between username", kGuiText,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                DrawCheckbox(memDC, g_publicWinsSpaceRect, g_guiPublicWinsSpaceBetweenUsername);
+
                 RestoreDC(memDC, savedDc);
             }
 
@@ -21102,6 +21144,13 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (PointInVisibleCardRect(g_publicHelpersCard, g_publicWinsSuffixRect, x, y)) {
             g_guiBindCapture = GUI_BIND_NONE;
             g_guiPublicWinsPosition = PUBLIC_WINS_POSITION_SUFFIX;
+            SaveToolSettings();
+            RequestGuiRepaint();
+            return 0;
+        }
+        if (PointInVisibleCardRect(g_publicHelpersCard, g_publicWinsSpaceRect, x, y)) {
+            g_guiBindCapture = GUI_BIND_NONE;
+            g_guiPublicWinsSpaceBetweenUsername = !g_guiPublicWinsSpaceBetweenUsername;
             SaveToolSettings();
             RequestGuiRepaint();
             return 0;
@@ -21987,7 +22036,10 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
                 g_lastHypixelTntTagContextSeenMs = 0;
             }
             InterlockedExchange(&g_tntTagGameActive, inTntTagGame ? 1 : 0);
+            InterlockedExchange(&g_hypixelTntTagGameActive, inHypixelTntTagGame ? 1 : 0);
             if (g_guiPublicWinsEnabled && inHypixelTntTagGame) {
+                EnsurePublicWinsTabNameHook(g_env);
+                EnsurePublicWinsApiTabHook(g_env);
                 EnsurePublicWinsScoreboardFormatHook(g_env);
                 EnsurePublicWinsRenderedNameHook(g_env);
             }
@@ -22159,6 +22211,7 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
 
     InterlockedExchange(&g_shutdownRequested, 1);
     InterlockedExchange(&g_tntTagGameActive, 0);
+    InterlockedExchange(&g_hypixelTntTagGameActive, 0);
     DebugLog("MainThread shutdown requested");
 
     MH_DisableHook(MH_ALL_HOOKS);
