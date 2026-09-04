@@ -3,5 +3,5 @@
 #ifndef EMBEDDED_DLL_PATH
 #error EMBEDDED_DLL_PATH must be defined by the project configuration.
 #endif
-IDI_APPICON ICON "pfp.ico"
+IDI_APPICON ICON "TagEssentials.ico"
 IDR_TAGESSENTIALS_MOD RCDATA EMBEDDED_DLL_PATH

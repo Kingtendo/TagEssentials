@@ -102,7 +102,7 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TagEssentialsMod.rc">
-      <AdditionalInputs>$(ProjectDir)..\pfp.ico;$(ProjectDir)..\assets\cosmic_background.png;$(ProjectDir)..\assets\cosmic_planet_sheet.png;$(ProjectDir)..\assets\theme_neon_city.png;$(ProjectDir)..\assets\theme_enchanted_forest.png;$(ProjectDir)..\assets\theme_inferno.png;$(ProjectDir)..\assets\theme_arctic_aurora.png;$(ProjectDir)..\assets\theme_neon_train_sprite_key.png;$(ProjectDir)..\assets\theme_forest_moth_sprite_key.png;$(ProjectDir)..\assets\theme_inferno_flame_sprite_key.png;$(ProjectDir)..\assets\theme_arctic_snow_sprite_key.png;$(ProjectDir)..\assets\theme_neon_flying_car_sprite_key.png;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs>$(ProjectDir)..\TagEssentials.ico;$(ProjectDir)..\assets\cosmic_background.png;$(ProjectDir)..\assets\cosmic_planet_sheet.png;$(ProjectDir)..\assets\theme_neon_city.png;$(ProjectDir)..\assets\theme_enchanted_forest.png;$(ProjectDir)..\assets\theme_inferno.png;$(ProjectDir)..\assets\theme_arctic_aurora.png;$(ProjectDir)..\assets\theme_neon_train_sprite_key.png;$(ProjectDir)..\assets\theme_forest_moth_sprite_key.png;$(ProjectDir)..\assets\theme_inferno_flame_sprite_key.png;$(ProjectDir)..\assets\theme_arctic_snow_sprite_key.png;$(ProjectDir)..\assets\theme_neon_flying_car_sprite_key.png;%(AdditionalInputs)</AdditionalInputs>
     </ResourceCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

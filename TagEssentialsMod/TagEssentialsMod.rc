@@ -1,5 +1,5 @@
 #include "resource.h"
-IDI_APPICON ICON "..\\pfp.ico"
+IDI_APPICON ICON "..\\TagEssentials.ico"
 IDR_COSMIC_BACKGROUND RCDATA "..\\assets\\cosmic_background.png"
 IDR_COSMIC_PLANETS RCDATA "..\\assets\\cosmic_planet_sheet.png"
 IDR_THEME_NEON_CITY RCDATA "..\\assets\\theme_neon_city.png"

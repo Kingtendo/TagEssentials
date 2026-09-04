@@ -648,8 +648,8 @@ void OpenMutedVoiceAuthUrl();
 void CopyMutedVoiceAuthCode();
 void SetMutedVoicePartyOwnerFromGui(const std::string& value);
 std::string NormalizeMutedVoicePartyOwner(const std::string& value);
-bool EnsureSeraphNameTagHook(JNIEnv* env);
-void RestoreSeraphNameTagHook(JNIEnv* env);
+bool EnsureNameTagHook(JNIEnv* env);
+void RestoreNameTagHook(JNIEnv* env);
 void SetPublicWinsEnabled(bool enabled);
 void StartPublicWinsWorker();
 void StopPublicWinsWorker();
@@ -1050,192 +1050,6 @@ std::vector<std::string> GetRuntimeConfigCandidateDirs() {
     return dirs;
 }
 
-#if 0 // Removed Seraph Labels implementation.
-struct SeraphLabelInfo {
-    bool hasLabel = false;
-    std::string label;
-    std::string reportType;
-    std::string reason;
-    bool blacklistTagged = false;
-    bool safelistTagged = false;
-    bool memberTagged = false;
-    bool botTagged = false;
-};
-
-struct SeraphCacheEntry {
-    bool fetching = false;
-    bool lastSuccess = false;
-    ULONGLONG fetchedAtMs = 0;
-    ULONGLONG nextFetchMs = 0;
-    SeraphLabelInfo info;
-};
-
-struct SeraphLookupRequest {
-    std::string key;
-    std::string player;
-};
-
-std::mutex g_seraphMutex;
-std::unordered_map<std::string, SeraphCacheEntry> g_seraphCache;
-std::deque<SeraphLookupRequest> g_seraphQueue;
-std::unordered_set<std::string> g_seraphQueuedKeys;
-std::unordered_set<std::string> g_seraphTeamLabelAppliedKeys;
-HANDLE g_seraphThreadHandle = nullptr;
-HANDLE g_seraphStopEvent = nullptr;
-HANDLE g_seraphQueueEvent = nullptr;
-volatile LONG g_seraphWorkerRunning = 0;
-volatile LONG g_seraphLabelsRuntimeEnabled = 0;
-volatile LONG g_seraphMissingKeyLogged = 0;
-std::string g_seraphApiKey;
-bool g_seraphApiKeyFromSettings = false;
-bool g_seraphApiKeyLookupDone = false;
-
-std::string SeraphLowerAscii(const std::string& value) {
-    std::string result = value;
-    for (char& ch : result) {
-        if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
-    }
-    return result;
-}
-
-bool IsHexAscii(char ch) {
-    return (ch >= '0' && ch <= '9') ||
-        (ch >= 'a' && ch <= 'f') ||
-        (ch >= 'A' && ch <= 'F');
-}
-
-bool IsSeraphLookupId(const std::string& value) {
-    std::string id = TrimAscii(value);
-    if (id.size() != 32 && id.size() != 36) return false;
-
-    for (size_t i = 0; i < id.size(); ++i) {
-        if (id.size() == 36 && (i == 8 || i == 13 || i == 18 || i == 23)) {
-            if (id[i] != '-') return false;
-            continue;
-        }
-
-        if (!IsHexAscii(id[i])) return false;
-    }
-
-    return true;
-}
-
-std::string NormalizeSeraphKey(const std::string& player) {
-    return SeraphLowerAscii(TrimAscii(player));
-}
-
-bool ReadFirstLineTrimmed(const std::string& path, std::string& value) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-
-    std::string line;
-    std::getline(f, line);
-    value = TrimAscii(line);
-    return !value.empty();
-}
-
-bool ReadSeraphApiKeyFromSettingsPath(const std::string& path, std::string& apiKey) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-
-    std::string key;
-    while (f >> key) {
-        if (key == "seraph_api_key") {
-            std::string value;
-            if (f >> value) {
-                apiKey = TrimAscii(value);
-                return !apiKey.empty();
-            }
-            return false;
-        }
-
-        std::string ignored;
-        std::getline(f, ignored);
-    }
-
-    return false;
-}
-
-bool IsSafeSeraphApiKeyValue(const std::string& apiKey) {
-    if (apiKey.empty()) return false;
-    for (char ch : apiKey) {
-        if (ch == '\r' || ch == '\n') return false;
-    }
-    return true;
-}
-
-void AddSeraphCandidateDir(std::vector<std::string>& dirs, const std::string& dir) {
-    if (dir.empty()) return;
-    for (const std::string& existing : dirs) {
-        if (_stricmp(existing.c_str(), dir.c_str()) == 0) return;
-    }
-    dirs.push_back(dir);
-}
-
-std::vector<std::string> GetSeraphCredentialCandidateDirs() {
-    std::vector<std::string> dirs;
-    std::string moduleDir = GetModuleDirectoryA(g_moduleHandle);
-    std::string stagedRuntimeDir;
-    if (ReadMutedVoiceRuntimeDir(moduleDir, stagedRuntimeDir)) {
-        AddSeraphCandidateDir(dirs, stagedRuntimeDir);
-    }
-
-    AddSeraphCandidateDir(dirs, moduleDir);
-    AddSeraphCandidateDir(dirs, GetModuleDirectoryA(nullptr));
-
-    char cwd[MAX_PATH] = {};
-    DWORD cwdLength = GetCurrentDirectoryA(MAX_PATH, cwd);
-    if (cwdLength > 0 && cwdLength < MAX_PATH) AddSeraphCandidateDir(dirs, cwd);
-    return dirs;
-}
-
-bool LoadSeraphApiKeyIfNeeded() {
-    {
-        std::lock_guard<std::mutex> lock(g_seraphMutex);
-        if (IsSafeSeraphApiKeyValue(g_seraphApiKey)) return true;
-        if (g_seraphApiKeyLookupDone) return false;
-    }
-
-    std::string loadedKey;
-    std::string loadedSource;
-    bool fromSettings = false;
-    std::vector<std::string> dirs = GetSeraphCredentialCandidateDirs();
-    for (const std::string& dir : dirs) {
-        std::string keyPath = JoinPathA(dir, kSeraphApiKeyFile);
-        if (ReadFirstLineTrimmed(keyPath, loadedKey) && IsSafeSeraphApiKeyValue(loadedKey)) {
-            loadedSource = keyPath;
-            break;
-        }
-
-        std::string settingsPath = JoinPathA(dir, kToolSettingsPath);
-        if (ReadSeraphApiKeyFromSettingsPath(settingsPath, loadedKey) && IsSafeSeraphApiKeyValue(loadedKey)) {
-            loadedSource = settingsPath;
-            fromSettings = true;
-            break;
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(g_seraphMutex);
-        g_seraphApiKeyLookupDone = true;
-        if (IsSafeSeraphApiKeyValue(loadedKey)) {
-            g_seraphApiKey = loadedKey;
-            g_seraphApiKeyFromSettings = g_seraphApiKeyFromSettings || fromSettings;
-        }
-    }
-
-    if (IsSafeSeraphApiKeyValue(loadedKey)) {
-        DebugLog("Seraph API key loaded source=%s", loadedSource.c_str());
-        return true;
-    }
-
-    if (InterlockedExchange(&g_seraphMissingKeyLogged, 1) == 0) {
-        DebugLog("Removed legacy label integration has no configured credential");
-    }
-    return false;
-}
-
-#endif
 
 std::wstring Utf8ToWide(const std::string& value) {
     if (value.empty()) return L"";
@@ -1407,506 +1221,6 @@ bool WinHttpReadAll(HINTERNET request, std::string& response) {
     }
 }
 
-#if 0 // Removed Seraph response parsing and worker implementation.
-std::string StripSeraphFormatting(std::string value) {
-    std::string clean;
-    clean.reserve(value.size());
-    for (size_t i = 0; i < value.size(); ++i) {
-        if ((unsigned char)value[i] == 0xC2 && i + 2 < value.size() && (unsigned char)value[i + 1] == 0xA7) {
-            i += 2;
-            continue;
-        }
-        if ((unsigned char)value[i] == 0xA7 && i + 1 < value.size()) {
-            ++i;
-            continue;
-        }
-        unsigned char ch = (unsigned char)value[i];
-        if (ch >= 0x20 && ch < 0x7F) clean.push_back((char)ch);
-    }
-    return TrimAscii(clean);
-}
-
-std::string FormatSeraphLabelText(const std::string& text) {
-    std::string clean = StripSeraphFormatting(text);
-    if (clean.empty()) return "";
-    if (clean.size() > 18) clean.resize(18);
-    if (!clean.empty() && clean.front() == '[') return clean;
-    return "[" + clean + "]";
-}
-
-std::string MakeSeraphFormattedLabel(const std::string& text, char colorCode) {
-    std::string clean = FormatSeraphLabelText(text);
-    if (clean.empty()) return "";
-
-    std::string label;
-    label += "\xC2\xA7";
-    label.push_back(colorCode);
-    label += clean;
-    return label;
-}
-
-bool ParseSeraphBlacklistResponse(const std::string& json, SeraphLabelInfo& info) {
-    info = SeraphLabelInfo{};
-
-    size_t dataStart = 0;
-    size_t dataEnd = 0;
-    if (!FindJsonObjectRange(json, "data", 0, json.size(), dataStart, dataEnd)) return false;
-
-    size_t blacklistStart = 0;
-    size_t blacklistEnd = 0;
-    if (FindJsonObjectRange(json, "blacklist", dataStart, dataEnd, blacklistStart, blacklistEnd)) {
-        JsonBoolInRange(json, blacklistStart, blacklistEnd, "tagged", info.blacklistTagged);
-        JsonStringInRange(json, blacklistStart, blacklistEnd, "report_type", info.reportType);
-        JsonStringInRange(json, blacklistStart, blacklistEnd, "reason", info.reason);
-    }
-
-    size_t safelistStart = 0;
-    size_t safelistEnd = 0;
-    if (FindJsonObjectRange(json, "safelist", dataStart, dataEnd, safelistStart, safelistEnd)) {
-        JsonBoolInRange(json, safelistStart, safelistEnd, "tagged", info.safelistTagged);
-    }
-
-    size_t memberStart = 0;
-    size_t memberEnd = 0;
-    if (FindJsonObjectRange(json, "member", dataStart, dataEnd, memberStart, memberEnd)) {
-        JsonBoolInRange(json, memberStart, memberEnd, "tagged", info.memberTagged);
-    }
-
-    size_t botStart = 0;
-    size_t botEnd = 0;
-    if (FindJsonObjectRange(json, "bot", dataStart, dataEnd, botStart, botEnd)) {
-        JsonBoolInRange(json, botStart, botEnd, "tagged", info.botTagged);
-    }
-
-    std::string customTag;
-    JsonStringInRange(json, dataStart, dataEnd, "customTag", customTag);
-
-    char colorCode = 'd';
-    std::string labelText;
-    if (!customTag.empty()) {
-        labelText = customTag;
-        if (info.blacklistTagged) colorCode = 'c';
-        else if (info.safelistTagged) colorCode = 'a';
-        else if (info.memberTagged) colorCode = 'b';
-        else if (info.botTagged) colorCode = 'e';
-    }
-    else if (info.blacklistTagged) {
-        labelText = "BL";
-        colorCode = 'c';
-    }
-    else if (info.safelistTagged) {
-        labelText = "SAFE";
-        colorCode = 'a';
-    }
-    else if (info.memberTagged) {
-        labelText = "SERAPH";
-        colorCode = 'b';
-    }
-    else if (info.botTagged) {
-        labelText = "BOT";
-        colorCode = 'e';
-    }
-
-    if (!labelText.empty()) {
-        info.label = MakeSeraphFormattedLabel(labelText, colorCode);
-        info.hasLabel = !info.label.empty();
-    }
-
-    return true;
-}
-
-bool WinHttpReadAll(HINTERNET request, std::string& response) {
-    response.clear();
-
-    for (;;) {
-        DWORD available = 0;
-        if (!WinHttpQueryDataAvailable(request, &available)) return false;
-        if (available == 0) return true;
-
-        std::vector<char> buffer(available);
-        DWORD read = 0;
-        if (!WinHttpReadData(request, buffer.data(), available, &read)) return false;
-        if (read == 0) return true;
-        response.append(buffer.data(), buffer.data() + read);
-        if (response.size() > 1024 * 1024) return false;
-    }
-}
-
-std::string SeraphLogPreview(const std::string& text) {
-    constexpr size_t kMaxPreview = 180;
-    std::string preview;
-    preview.reserve(text.size() < kMaxPreview ? text.size() : kMaxPreview);
-
-    for (char ch : text) {
-        if (preview.size() >= kMaxPreview) break;
-        unsigned char value = static_cast<unsigned char>(ch);
-        if (ch == '\r' || ch == '\n' || ch == '\t') {
-            preview.push_back(' ');
-        }
-        else if (value < 32) {
-            preview.push_back('?');
-        }
-        else {
-            preview.push_back(ch);
-        }
-    }
-
-    if (text.size() > kMaxPreview) preview += "...";
-    return preview;
-}
-
-bool FetchSeraphBlacklist(
-    const std::string& player,
-    const std::string& apiKey,
-    SeraphLabelInfo& info,
-    DWORD& statusCode,
-    DWORD& lastError,
-    std::string& failStage,
-    std::string& responseText) {
-    statusCode = 0;
-    lastError = ERROR_SUCCESS;
-    failStage.clear();
-    responseText.clear();
-    info = SeraphLabelInfo{};
-    if (player.empty() || apiKey.empty()) {
-        lastError = ERROR_INVALID_PARAMETER;
-        failStage = "input";
-        return false;
-    }
-
-    HINTERNET session = WinHttpOpen(
-        L"TagEssentials Seraph Labels/1.0",
-        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-        WINHTTP_NO_PROXY_NAME,
-        WINHTTP_NO_PROXY_BYPASS,
-        0);
-    if (!session) {
-        lastError = GetLastError();
-        failStage = "open-session";
-        return false;
-    }
-
-    WinHttpSetTimeouts(session, 5000, 5000, 5000, 8000);
-    DWORD secureProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
-    if (!WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &secureProtocols, sizeof(secureProtocols))) {
-        DebugLog("Seraph WinHTTP TLS option failed error=%lu", (unsigned long)GetLastError());
-    }
-
-    HINTERNET connect = WinHttpConnect(session, kSeraphApiHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!connect) {
-        lastError = GetLastError();
-        failStage = "connect";
-        WinHttpCloseHandle(session);
-        return false;
-    }
-
-    std::wstring path = L"/";
-    path += UrlEncodePathSegment(player);
-    path += L"/blacklist";
-
-    HINTERNET request = WinHttpOpenRequest(
-        connect,
-        L"GET",
-        path.c_str(),
-        nullptr,
-        WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES,
-        WINHTTP_FLAG_SECURE);
-    if (!request) {
-        lastError = GetLastError();
-        failStage = "open-request";
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        return false;
-    }
-
-    std::wstring keyWide = Utf8ToWide(apiKey);
-    std::wstring headers = L"Accept: application/json\r\nseraph-api-key: ";
-    headers += keyWide;
-    headers += L"\r\n";
-    if (!WinHttpAddRequestHeaders(request, headers.c_str(), (DWORD)-1L, WINHTTP_ADDREQ_FLAG_ADD)) {
-        lastError = GetLastError();
-        failStage = "headers";
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        return false;
-    }
-
-    bool ok = false;
-    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
-        lastError = GetLastError();
-        failStage = "send";
-    }
-    else if (!WinHttpReceiveResponse(request, nullptr)) {
-        lastError = GetLastError();
-        failStage = "receive";
-    }
-    else {
-        DWORD statusSize = sizeof(statusCode);
-        if (!WinHttpQueryHeaders(
-            request,
-            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            WINHTTP_HEADER_NAME_BY_INDEX,
-            &statusCode,
-            &statusSize,
-            WINHTTP_NO_HEADER_INDEX)) {
-            lastError = GetLastError();
-            failStage = "status";
-        }
-        else if (!WinHttpReadAll(request, responseText)) {
-            lastError = GetLastError();
-            failStage = "read";
-        }
-        else if (statusCode < 200 || statusCode >= 300) {
-            failStage = "http";
-        }
-        else {
-            ok = ParseSeraphBlacklistResponse(responseText, info);
-            if (!ok) failStage = "parse";
-        }
-    }
-
-    if (ok) failStage.clear();
-
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connect);
-    WinHttpCloseHandle(session);
-    return ok;
-}
-
-bool PopSeraphRequest(SeraphLookupRequest& request) {
-    std::lock_guard<std::mutex> lock(g_seraphMutex);
-    if (g_seraphQueue.empty()) return false;
-
-    request = g_seraphQueue.front();
-    g_seraphQueue.pop_front();
-    g_seraphQueuedKeys.erase(request.key);
-    if (g_seraphQueue.empty() && g_seraphQueueEvent) ResetEvent(g_seraphQueueEvent);
-    return true;
-}
-
-DWORD WINAPI SeraphWorkerThread(LPVOID) {
-    InterlockedExchange(&g_seraphWorkerRunning, 1);
-
-    std::string apiKey;
-    {
-        std::lock_guard<std::mutex> lock(g_seraphMutex);
-        apiKey = g_seraphApiKey;
-    }
-
-    while (g_seraphStopEvent && WaitForSingleObject(g_seraphStopEvent, 0) == WAIT_TIMEOUT) {
-        SeraphLookupRequest request;
-        if (!PopSeraphRequest(request)) {
-            if (g_seraphQueueEvent) WaitForSingleObject(g_seraphQueueEvent, 1000);
-            continue;
-        }
-
-        SeraphLabelInfo info;
-        DWORD statusCode = 0;
-        DWORD lastError = ERROR_SUCCESS;
-        std::string failStage;
-        std::string responseText;
-        bool ok = FetchSeraphBlacklist(request.player, apiKey, info, statusCode, lastError, failStage, responseText);
-
-        ULONGLONG nowMs = GetTickCount64();
-        {
-            std::lock_guard<std::mutex> lock(g_seraphMutex);
-            SeraphCacheEntry& entry = g_seraphCache[request.key];
-            entry.fetching = false;
-            entry.lastSuccess = ok;
-            entry.fetchedAtMs = nowMs;
-            entry.nextFetchMs = nowMs + (ok ? kSeraphSuccessCooldownMs : kSeraphFailureCooldownMs);
-            entry.info = ok ? info : SeraphLabelInfo{};
-        }
-
-        if (ok) {
-            DebugLog("Seraph fetch success player=%s label=%s blacklist=%d safelist=%d member=%d bot=%d report=%s reasonLen=%u",
-                request.player.c_str(),
-                info.hasLabel ? StripSeraphFormatting(info.label).c_str() : "",
-                info.blacklistTagged ? 1 : 0,
-                info.safelistTagged ? 1 : 0,
-                info.memberTagged ? 1 : 0,
-                info.botTagged ? 1 : 0,
-                info.reportType.c_str(),
-                (unsigned int)info.reason.size());
-        }
-        else {
-            std::string preview = SeraphLogPreview(responseText);
-            DebugLog("Seraph fetch failed player=%s stage=%s error=%lu status=%lu responseBytes=%u response=%s",
-                request.player.c_str(),
-                failStage.empty() ? "unknown" : failStage.c_str(),
-                (unsigned long)lastError,
-                (unsigned long)statusCode,
-                (unsigned int)responseText.size(),
-                preview.c_str());
-        }
-    }
-
-    InterlockedExchange(&g_seraphWorkerRunning, 0);
-    return 0;
-}
-
-void StartSeraphWorker() {
-    if (!LoadSeraphApiKeyIfNeeded()) return;
-
-    std::lock_guard<std::mutex> lock(g_seraphMutex);
-    if (g_seraphThreadHandle) {
-        DWORD waitResult = WaitForSingleObject(g_seraphThreadHandle, 0);
-        if (waitResult == WAIT_TIMEOUT) return;
-
-        CloseHandle(g_seraphThreadHandle);
-        g_seraphThreadHandle = nullptr;
-        if (g_seraphStopEvent) {
-            CloseHandle(g_seraphStopEvent);
-            g_seraphStopEvent = nullptr;
-        }
-        if (g_seraphQueueEvent) {
-            CloseHandle(g_seraphQueueEvent);
-            g_seraphQueueEvent = nullptr;
-        }
-    }
-
-    g_seraphStopEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
-    g_seraphQueueEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
-    if (!g_seraphStopEvent || !g_seraphQueueEvent) {
-        if (g_seraphStopEvent) CloseHandle(g_seraphStopEvent);
-        if (g_seraphQueueEvent) CloseHandle(g_seraphQueueEvent);
-        g_seraphStopEvent = nullptr;
-        g_seraphQueueEvent = nullptr;
-        DebugLog("Seraph worker failed to create events");
-        return;
-    }
-
-    DWORD threadId = 0;
-    g_seraphThreadHandle = CreateThread(nullptr, 0, SeraphWorkerThread, nullptr, 0, &threadId);
-    if (!g_seraphThreadHandle) {
-        CloseHandle(g_seraphStopEvent);
-        CloseHandle(g_seraphQueueEvent);
-        g_seraphStopEvent = nullptr;
-        g_seraphQueueEvent = nullptr;
-        DebugLog("Seraph worker failed to create thread");
-        return;
-    }
-
-    DebugLog("Seraph worker started threadId=%lu", threadId);
-}
-
-void StopSeraphWorker() {
-    HANDLE threadHandle = nullptr;
-    HANDLE stopEvent = nullptr;
-
-    {
-        std::lock_guard<std::mutex> lock(g_seraphMutex);
-        threadHandle = g_seraphThreadHandle;
-        stopEvent = g_seraphStopEvent;
-        if (stopEvent) SetEvent(stopEvent);
-        if (g_seraphQueueEvent) SetEvent(g_seraphQueueEvent);
-    }
-
-    if (threadHandle) {
-        DWORD waitResult = WaitForSingleObject(threadHandle, 5000);
-        if (waitResult == WAIT_TIMEOUT) {
-            DebugLog("Seraph worker did not stop within timeout");
-            return;
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(g_seraphMutex);
-        if (g_seraphThreadHandle) {
-            CloseHandle(g_seraphThreadHandle);
-            g_seraphThreadHandle = nullptr;
-        }
-        if (g_seraphStopEvent) {
-            CloseHandle(g_seraphStopEvent);
-            g_seraphStopEvent = nullptr;
-        }
-        if (g_seraphQueueEvent) {
-            CloseHandle(g_seraphQueueEvent);
-            g_seraphQueueEvent = nullptr;
-        }
-        g_seraphQueue.clear();
-        g_seraphQueuedKeys.clear();
-        g_seraphTeamLabelAppliedKeys.clear();
-        for (auto& item : g_seraphCache) item.second.fetching = false;
-    }
-}
-
-void SetSeraphLabelsEnabled(bool enabled) {
-    g_guiExtrasSeraphLabels = enabled;
-    InterlockedExchange(&g_seraphLabelsRuntimeEnabled, enabled ? 1 : 0);
-    if (enabled) {
-        {
-            std::lock_guard<std::mutex> lock(g_seraphMutex);
-            if (g_seraphApiKey.empty()) g_seraphApiKeyLookupDone = false;
-        }
-        StartSeraphWorker();
-    }
-    else {
-        StopSeraphWorker();
-    }
-}
-
-void QueueSeraphLookup(const std::string& lookupId) {
-    if (InterlockedCompareExchange(&g_seraphLabelsRuntimeEnabled, 0, 0) == 0) return;
-    if (InterlockedCompareExchange(&g_seraphWorkerRunning, 0, 0) == 0) return;
-    if (!IsSeraphLookupId(lookupId)) return;
-
-    std::string key = NormalizeSeraphKey(lookupId);
-    if (key.empty()) return;
-
-    HANDLE queueEvent = nullptr;
-    ULONGLONG nowMs = GetTickCount64();
-    {
-        std::lock_guard<std::mutex> lock(g_seraphMutex);
-        SeraphCacheEntry& entry = g_seraphCache[key];
-        if (entry.fetching || nowMs < entry.nextFetchMs) return;
-
-        entry.fetching = true;
-        entry.nextFetchMs = nowMs + kSeraphRequestCooldownMs;
-        if (g_seraphQueuedKeys.insert(key).second) {
-            g_seraphQueue.push_back({ key, lookupId });
-        }
-        queueEvent = g_seraphQueueEvent;
-    }
-
-    if (queueEvent) SetEvent(queueEvent);
-}
-
-bool GetSeraphCachedLabel(const std::string& lookupId, std::string& label) {
-    label.clear();
-    if (InterlockedCompareExchange(&g_seraphLabelsRuntimeEnabled, 0, 0) == 0) return false;
-
-    if (!IsSeraphLookupId(lookupId)) return false;
-    std::string key = NormalizeSeraphKey(lookupId);
-    if (key.empty()) return false;
-
-    std::lock_guard<std::mutex> lock(g_seraphMutex);
-    auto it = g_seraphCache.find(key);
-    if (it == g_seraphCache.end() || !it->second.lastSuccess || !it->second.info.hasLabel) return false;
-
-    label = it->second.info.label;
-    return !label.empty();
-}
-
-void SetSeraphTeamLabelApplied(const std::string& playerName, bool applied) {
-    std::string key = NormalizeSeraphKey(playerName);
-    if (key.empty()) return;
-
-    std::lock_guard<std::mutex> lock(g_seraphMutex);
-    if (applied) g_seraphTeamLabelAppliedKeys.insert(key);
-    else g_seraphTeamLabelAppliedKeys.erase(key);
-}
-
-bool IsSeraphTeamLabelApplied(const std::string& playerName) {
-    std::string key = NormalizeSeraphKey(playerName);
-    if (key.empty()) return false;
-
-    std::lock_guard<std::mutex> lock(g_seraphMutex);
-    return g_seraphTeamLabelAppliedKeys.find(key) != g_seraphTeamLabelAppliedKeys.end();
-}
-#endif
 
 // =============================================================
 // Public Helpers - Hypixel TNT Tag wins
@@ -6416,125 +5730,6 @@ bool SetTeamPrefixAndSuffix(jobject team, const std::string& prefix, const std::
     return prefixOk && suffixOk;
 }
 
-#if 0 // Removed Seraph team-label integration.
-std::string BuildSeraphTeamPrefix(const std::string& basePrefix, const std::string& seraphLabel) {
-    if (seraphLabel.empty()) return basePrefix;
-
-    std::string labelPrefix = seraphLabel + " ";
-    size_t labelChars = CountUtf8Chars(labelPrefix);
-    size_t maxBaseChars = (labelChars >= 16) ? 0 : (16 - labelChars);
-    return labelPrefix + TruncateSuffixBase(basePrefix, maxBaseChars);
-}
-
-void ApplySeraphLabelsToPlayerTeams(bool enableSeraphLabels) {
-    if (!enableSeraphLabels) {
-        std::lock_guard<std::mutex> lock(g_seraphMutex);
-        g_seraphTeamLabelAppliedKeys.clear();
-    }
-
-    if (!g_env || !InitScoreboardJNI()) {
-        if (!enableSeraphLabels) g_seraphTeamPrefixCache.clear();
-        return;
-    }
-
-    std::unordered_map<std::string, std::string> playerUuidByName;
-    if (enableSeraphLabels) {
-        jobject world = GetWorldObject();
-        if (world) {
-            BuildWorldPlayerUuidByName(world, playerUuidByName);
-            g_env->DeleteLocalRef(world);
-        }
-    }
-
-    jobjectArray arr = GetScoreboardTeamArray();
-    if (!arr) {
-        if (!enableSeraphLabels) g_seraphTeamPrefixCache.clear();
-        return;
-    }
-
-    jsize len = g_env->GetArrayLength(arr);
-    int changedCount = 0;
-    int labelledCount = 0;
-    for (jsize i = 0; i < len; i++) {
-        jobject team = g_env->GetObjectArrayElement(arr, i);
-        if (!team) continue;
-
-        jstring teamNameStr = (jstring)g_env->GetObjectField(team, g_scoreboardJNI.fTeamName);
-        std::string teamName = JStringToUtf8(teamNameStr);
-        if (teamNameStr) g_env->DeleteLocalRef(teamNameStr);
-
-        std::string playerName = GetSingleTeamPlayerName(team);
-        if (teamName.empty() || playerName.empty()) {
-            g_env->DeleteLocalRef(team);
-            continue;
-        }
-
-        jstring prefixStr = (jstring)g_env->GetObjectField(team, g_scoreboardJNI.fTeamE);
-        std::string currentPrefix = JStringToUtf8(prefixStr);
-        if (prefixStr) g_env->DeleteLocalRef(prefixStr);
-
-        auto it = g_seraphTeamPrefixCache.find(teamName);
-        auto publicIt = g_publicWinsTeamFormatCache.find(teamName);
-        bool publicOwnsPrefix = publicIt != g_publicWinsTeamFormatCache.end() &&
-            currentPrefix == publicIt->second.appliedPrefix &&
-            publicIt->second.appliedPrefix != publicIt->second.basePrefix;
-        std::string effectivePrefix = publicOwnsPrefix ? publicIt->second.basePrefix : currentPrefix;
-        if (enableSeraphLabels) {
-            std::string lookupId;
-            auto uuidIt = playerUuidByName.find(NormalizeSeraphKey(playerName));
-            if (uuidIt != playerUuidByName.end()) {
-                lookupId = uuidIt->second;
-                QueueSeraphLookup(lookupId);
-            }
-
-            if (it == g_seraphTeamPrefixCache.end()) {
-                SeraphTeamPrefixState state;
-                state.basePrefix = effectivePrefix;
-                it = g_seraphTeamPrefixCache.emplace(teamName, state).first;
-            }
-            else if (!it->second.appliedPrefix.empty() && effectivePrefix != it->second.appliedPrefix) {
-                it->second.basePrefix = effectivePrefix;
-            }
-
-            std::string label;
-            bool hasLabel = !lookupId.empty() && GetSeraphCachedLabel(lookupId, label);
-            std::string desiredPrefix = hasLabel ? BuildSeraphTeamPrefix(it->second.basePrefix, label) : it->second.basePrefix;
-            if (publicOwnsPrefix) {
-                publicIt->second.basePrefix = desiredPrefix;
-            }
-            else if (currentPrefix != desiredPrefix && SetTeamStringField(team, g_scoreboardJNI.fTeamE, desiredPrefix)) {
-                ++changedCount;
-            }
-
-            it->second.appliedPrefix = desiredPrefix;
-            SetSeraphTeamLabelApplied(playerName, hasLabel && desiredPrefix != it->second.basePrefix);
-            if (hasLabel) ++labelledCount;
-        }
-        else if (it != g_seraphTeamPrefixCache.end()) {
-            if (publicOwnsPrefix) {
-                publicIt->second.basePrefix = it->second.basePrefix;
-            }
-            else if (!it->second.appliedPrefix.empty() &&
-                currentPrefix == it->second.appliedPrefix &&
-                currentPrefix != it->second.basePrefix &&
-                SetTeamStringField(team, g_scoreboardJNI.fTeamE, it->second.basePrefix)) {
-                ++changedCount;
-            }
-        }
-
-        g_env->DeleteLocalRef(team);
-    }
-
-    g_env->DeleteLocalRef(arr);
-    if (!enableSeraphLabels) g_seraphTeamPrefixCache.clear();
-    if (changedCount > 0) {
-        DebugLog("Seraph team labels updated changed=%d labelled=%d enabled=%d",
-            changedCount,
-            labelledCount,
-            enableSeraphLabels ? 1 : 0);
-    }
-}
-#endif
 
 bool IsMinecraftFormatCodeAt(const std::string& value, size_t index, size_t& codeLength) {
     if (index < value.size() && value[index] == '\xC2' && index + 2 < value.size() && value[index + 1] == '\xA7') {
@@ -11027,8 +10222,8 @@ bool RedefineBarrierClass(JNIEnv* env, const std::vector<unsigned char>& classBy
     return RedefineJavaClass(env, barrierClass, classBytes, "BlockBarrier");
 }
 
-jclass g_seraphRenderPlayerClass = nullptr;
-jclass g_seraphNameTagHelperClass = nullptr;
+jclass g_nameTagRenderPlayerClass = nullptr;
+jclass g_nameTagHelperClass = nullptr;
 jclass g_publicWinsScoreFormatHelperClass = nullptr;
 jclass g_publicWinsRenderedNameHelperClass = nullptr;
 jclass g_publicWinsRenderedComponentHelperClass = nullptr;
@@ -11040,8 +10235,8 @@ jclass g_publicWinsLivingRendererClass = nullptr;
 jclass g_lunarNametagEntityPlayerClass = nullptr;
 jclass g_lunarAdventureComponentClass = nullptr;
 jclass g_lunarAdventureTextColorClass = nullptr;
-std::vector<unsigned char> g_seraphOriginalRenderPlayerBytes;
-std::vector<unsigned char> g_seraphPatchedRenderPlayerBytes;
+std::vector<unsigned char> g_nameTagOriginalRenderPlayerBytes;
+std::vector<unsigned char> g_nameTagPatchedRenderPlayerBytes;
 std::vector<unsigned char> g_publicWinsOriginalTabOverlayBytes;
 std::vector<unsigned char> g_publicWinsPatchedTabOverlayBytes;
 std::vector<unsigned char> g_publicWinsOriginalApiTabRendererBytes;
@@ -11050,8 +10245,8 @@ std::vector<unsigned char> g_publicWinsOriginalScorePlayerTeamBytes;
 std::vector<unsigned char> g_publicWinsPatchedScorePlayerTeamBytes;
 std::vector<unsigned char> g_publicWinsOriginalLivingRendererBytes;
 std::vector<unsigned char> g_publicWinsPatchedLivingRendererBytes;
-bool g_seraphNameTagHookPatched = false;
-bool g_seraphNameTagHookFailed = false;
+bool g_nameTagHookPatched = false;
+bool g_nameTagHookFailed = false;
 bool g_publicWinsTabHookPatched = false;
 bool g_publicWinsTabHookFailed = false;
 bool g_publicWinsApiTabHookPatched = false;
@@ -11060,8 +10255,8 @@ bool g_publicWinsScoreboardFormatHookPatched = false;
 bool g_publicWinsScoreboardFormatHookFailed = false;
 bool g_publicWinsRenderedNameHookPatched = false;
 bool g_publicWinsRenderedNameHookFailed = false;
-std::mutex g_seraphNameTagJniMutex;
-jmethodID g_seraphPlayerGetProfile = nullptr;
+std::mutex g_nameTagJniMutex;
+jmethodID g_nameTagPlayerGetProfile = nullptr;
 jmethodID g_publicWinsNetworkInfoGetProfile = nullptr;
 jmethodID g_publicWinsNetworkInfoGetPlayerName = nullptr;
 jmethodID g_publicWinsNetworkInfoGetDisplayName = nullptr;
@@ -11078,11 +10273,11 @@ jmethodID g_lunarAdventureTextContentSet = nullptr;
 jmethodID g_lunarAdventureComponentTextColored = nullptr;
 jmethodID g_lunarAdventureTextColorFromRgb = nullptr;
 jmethodID g_lunarAdventureComponentAppend = nullptr;
-jmethodID g_seraphProfileGetName = nullptr;
-jmethodID g_seraphProfileGetId = nullptr;
-jmethodID g_seraphUuidToString = nullptr;
+jmethodID g_nameTagProfileGetName = nullptr;
+jmethodID g_nameTagProfileGetId = nullptr;
+jmethodID g_nameTagUuidToString = nullptr;
 
-struct SeraphPlayerIdentity {
+struct PlayerIdentity {
     std::string name;
     std::string uuid;
 };
@@ -11636,12 +10831,12 @@ void ApplyPublicWinsToPlayerTeams(bool enablePublicWins) {
     }
 }
 
-SeraphPlayerIdentity GetSeraphPlayerIdentityForHook(JNIEnv* env, jobject player) {
-    SeraphPlayerIdentity identity;
+PlayerIdentity GetPlayerIdentityForHook(JNIEnv* env, jobject player) {
+    PlayerIdentity identity;
     if (!env || !player) return identity;
 
-    std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
-    if (!g_seraphPlayerGetProfile) {
+    std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
+    if (!g_nameTagPlayerGetProfile) {
         jclass playerClass = env->GetObjectClass(player);
         if (!playerClass || env->ExceptionCheck()) {
             env->ExceptionClear();
@@ -11649,23 +10844,23 @@ SeraphPlayerIdentity GetSeraphPlayerIdentityForHook(JNIEnv* env, jobject player)
             return identity;
         }
 
-        g_seraphPlayerGetProfile = GetMethodIDCompat(env, playerClass, "cd", "()Lcom/mojang/authlib/GameProfile;");
+        g_nameTagPlayerGetProfile = GetMethodIDCompat(env, playerClass, "cd", "()Lcom/mojang/authlib/GameProfile;");
         env->DeleteLocalRef(playerClass);
-        if (!g_seraphPlayerGetProfile || env->ExceptionCheck()) {
+        if (!g_nameTagPlayerGetProfile || env->ExceptionCheck()) {
             env->ExceptionClear();
-            g_seraphPlayerGetProfile = nullptr;
+            g_nameTagPlayerGetProfile = nullptr;
             return identity;
         }
     }
 
-    jobject profile = env->CallObjectMethod(player, g_seraphPlayerGetProfile);
+    jobject profile = env->CallObjectMethod(player, g_nameTagPlayerGetProfile);
     if (!profile || env->ExceptionCheck()) {
         env->ExceptionClear();
         if (profile) env->DeleteLocalRef(profile);
         return identity;
     }
 
-    if (!g_seraphProfileGetName) {
+    if (!g_nameTagProfileGetName) {
         jclass profileClass = env->GetObjectClass(profile);
         if (!profileClass || env->ExceptionCheck()) {
             env->ExceptionClear();
@@ -11674,24 +10869,24 @@ SeraphPlayerIdentity GetSeraphPlayerIdentityForHook(JNIEnv* env, jobject player)
             return identity;
         }
 
-        g_seraphProfileGetName = GetMethodIDCompat(env, profileClass, "getName", "()Ljava/lang/String;");
-        if (!g_seraphProfileGetName || env->ExceptionCheck()) {
+        g_nameTagProfileGetName = GetMethodIDCompat(env, profileClass, "getName", "()Ljava/lang/String;");
+        if (!g_nameTagProfileGetName || env->ExceptionCheck()) {
             env->ExceptionClear();
-            g_seraphProfileGetName = nullptr;
+            g_nameTagProfileGetName = nullptr;
             env->DeleteLocalRef(profileClass);
             env->DeleteLocalRef(profile);
             return identity;
         }
 
-        g_seraphProfileGetId = GetMethodIDCompat(env, profileClass, "getId", "()Ljava/util/UUID;");
+        g_nameTagProfileGetId = GetMethodIDCompat(env, profileClass, "getId", "()Ljava/util/UUID;");
         env->DeleteLocalRef(profileClass);
-        if (!g_seraphProfileGetId || env->ExceptionCheck()) {
+        if (!g_nameTagProfileGetId || env->ExceptionCheck()) {
             env->ExceptionClear();
-            g_seraphProfileGetId = nullptr;
+            g_nameTagProfileGetId = nullptr;
         }
     }
 
-    jstring nameString = (jstring)env->CallObjectMethod(profile, g_seraphProfileGetName);
+    jstring nameString = (jstring)env->CallObjectMethod(profile, g_nameTagProfileGetName);
     if (!nameString || env->ExceptionCheck()) {
         env->ExceptionClear();
         if (nameString) env->DeleteLocalRef(nameString);
@@ -11702,32 +10897,32 @@ SeraphPlayerIdentity GetSeraphPlayerIdentityForHook(JNIEnv* env, jobject player)
     identity.name = JStringToUtf8(env, nameString);
     env->DeleteLocalRef(nameString);
 
-    if (g_seraphProfileGetId) {
-        jobject uuidObj = env->CallObjectMethod(profile, g_seraphProfileGetId);
+    if (g_nameTagProfileGetId) {
+        jobject uuidObj = env->CallObjectMethod(profile, g_nameTagProfileGetId);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
             uuidObj = nullptr;
         }
 
         if (uuidObj) {
-            if (!g_seraphUuidToString) {
+            if (!g_nameTagUuidToString) {
                 jclass uuidClass = env->GetObjectClass(uuidObj);
                 if (!uuidClass || env->ExceptionCheck()) {
                     env->ExceptionClear();
                     if (uuidClass) env->DeleteLocalRef(uuidClass);
                 }
                 else {
-                    g_seraphUuidToString = GetMethodIDCompat(env, uuidClass, "toString", "()Ljava/lang/String;");
+                    g_nameTagUuidToString = GetMethodIDCompat(env, uuidClass, "toString", "()Ljava/lang/String;");
                     env->DeleteLocalRef(uuidClass);
-                    if (!g_seraphUuidToString || env->ExceptionCheck()) {
+                    if (!g_nameTagUuidToString || env->ExceptionCheck()) {
                         env->ExceptionClear();
-                        g_seraphUuidToString = nullptr;
+                        g_nameTagUuidToString = nullptr;
                     }
                 }
             }
 
-            if (g_seraphUuidToString) {
-                jstring uuidString = (jstring)env->CallObjectMethod(uuidObj, g_seraphUuidToString);
+            if (g_nameTagUuidToString) {
+                jstring uuidString = (jstring)env->CallObjectMethod(uuidObj, g_nameTagUuidToString);
                 if (env->ExceptionCheck()) {
                     env->ExceptionClear();
                     if (uuidString) env->DeleteLocalRef(uuidString);
@@ -11746,11 +10941,11 @@ SeraphPlayerIdentity GetSeraphPlayerIdentityForHook(JNIEnv* env, jobject player)
     return identity;
 }
 
-SeraphPlayerIdentity GetSeraphNetworkInfoIdentityForHook(JNIEnv* env, jobject networkInfo) {
-    SeraphPlayerIdentity identity;
+PlayerIdentity GetNetworkInfoIdentityForHook(JNIEnv* env, jobject networkInfo) {
+    PlayerIdentity identity;
     if (!env || !networkInfo) return identity;
 
-    std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+    std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
     if (!g_publicWinsNetworkInfoGetProfile) {
         jclass infoClass = env->GetObjectClass(networkInfo);
         if (!infoClass || env->ExceptionCheck()) {
@@ -11775,7 +10970,7 @@ SeraphPlayerIdentity GetSeraphNetworkInfoIdentityForHook(JNIEnv* env, jobject ne
     }
 
     jclass profileClass = nullptr;
-    if (!g_seraphProfileGetName || !g_seraphProfileGetId) {
+    if (!g_nameTagProfileGetName || !g_nameTagProfileGetId) {
         profileClass = env->GetObjectClass(profile);
         if (!profileClass || env->ExceptionCheck()) {
             env->ExceptionClear();
@@ -11783,17 +10978,17 @@ SeraphPlayerIdentity GetSeraphNetworkInfoIdentityForHook(JNIEnv* env, jobject ne
             env->DeleteLocalRef(profile);
             return identity;
         }
-        if (!g_seraphProfileGetName) g_seraphProfileGetName = GetMethodIDCompat(env, profileClass, "getName", "()Ljava/lang/String;");
-        if (!g_seraphProfileGetId) g_seraphProfileGetId = GetMethodIDCompat(env, profileClass, "getId", "()Ljava/util/UUID;");
+        if (!g_nameTagProfileGetName) g_nameTagProfileGetName = GetMethodIDCompat(env, profileClass, "getName", "()Ljava/lang/String;");
+        if (!g_nameTagProfileGetId) g_nameTagProfileGetId = GetMethodIDCompat(env, profileClass, "getId", "()Ljava/util/UUID;");
         env->DeleteLocalRef(profileClass);
-        if (!g_seraphProfileGetName || env->ExceptionCheck()) {
+        if (!g_nameTagProfileGetName || env->ExceptionCheck()) {
             env->ExceptionClear();
             env->DeleteLocalRef(profile);
             return identity;
         }
     }
 
-    jstring nameString = (jstring)env->CallObjectMethod(profile, g_seraphProfileGetName);
+    jstring nameString = (jstring)env->CallObjectMethod(profile, g_nameTagProfileGetName);
     if (!nameString || env->ExceptionCheck()) {
         env->ExceptionClear();
         if (nameString) env->DeleteLocalRef(nameString);
@@ -11803,23 +10998,23 @@ SeraphPlayerIdentity GetSeraphNetworkInfoIdentityForHook(JNIEnv* env, jobject ne
     identity.name = JStringToUtf8(env, nameString);
     env->DeleteLocalRef(nameString);
 
-    if (g_seraphProfileGetId) {
-        jobject uuidObj = env->CallObjectMethod(profile, g_seraphProfileGetId);
+    if (g_nameTagProfileGetId) {
+        jobject uuidObj = env->CallObjectMethod(profile, g_nameTagProfileGetId);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
             uuidObj = nullptr;
         }
         if (uuidObj) {
-            if (!g_seraphUuidToString) {
+            if (!g_nameTagUuidToString) {
                 jclass uuidClass = env->GetObjectClass(uuidObj);
                 if (uuidClass && !env->ExceptionCheck()) {
-                    g_seraphUuidToString = GetMethodIDCompat(env, uuidClass, "toString", "()Ljava/lang/String;");
+                    g_nameTagUuidToString = GetMethodIDCompat(env, uuidClass, "toString", "()Ljava/lang/String;");
                     env->DeleteLocalRef(uuidClass);
                 }
                 if (env->ExceptionCheck()) env->ExceptionClear();
             }
-            if (g_seraphUuidToString) {
-                jstring uuidString = (jstring)env->CallObjectMethod(uuidObj, g_seraphUuidToString);
+            if (g_nameTagUuidToString) {
+                jstring uuidString = (jstring)env->CallObjectMethod(uuidObj, g_nameTagUuidToString);
                 if (!env->ExceptionCheck()) identity.uuid = JStringToUtf8(env, uuidString);
                 else env->ExceptionClear();
                 if (uuidString) env->DeleteLocalRef(uuidString);
@@ -11833,7 +11028,7 @@ SeraphPlayerIdentity GetSeraphNetworkInfoIdentityForHook(JNIEnv* env, jobject ne
 
 std::string GetVanillaTabDisplayName(JNIEnv* env, jobject networkInfo, const std::string& profileName) {
     if (!env || !networkInfo) return profileName;
-    std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+    std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
 
     jclass infoClass = env->GetObjectClass(networkInfo);
     if (!infoClass || env->ExceptionCheck()) {
@@ -11941,7 +11136,7 @@ jstring MakePatchedDisplayString(JNIEnv* env, jstring original, const std::strin
     return patchedName;
 }
 
-jstring JNICALL SeraphNameTagHookDispatch(JNIEnv* env, jclass, jobject player, jstring displayName) {
+jstring JNICALL NameTagHookDispatch(JNIEnv* env, jclass, jobject player, jstring displayName) {
     if (!env || !displayName) return displayName;
     LONG dispatchNumber = InterlockedIncrement(&g_publicWinsNameTagDispatchCount);
     bool publicWinsEnabled = InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) != 0 &&
@@ -11958,10 +11153,10 @@ jstring JNICALL SeraphNameTagHookDispatch(JNIEnv* env, jclass, jobject player, j
     }
     std::string result = currentName;
     bool publicCacheHit = false;
-    SeraphPlayerIdentity identity;
+    PlayerIdentity identity;
     bool hasIdentity = false;
 
-    identity = GetSeraphPlayerIdentityForHook(env, player);
+    identity = GetPlayerIdentityForHook(env, player);
     hasIdentity = !identity.name.empty() && IsUuidLookupId(identity.uuid);
     if (!hasIdentity && dispatchNumber <= 5) {
         DebugLog("Public wins nametag dispatch=%ld invalidIdentity namePresent=%d uuidLength=%u",
@@ -11990,7 +11185,7 @@ jstring JNICALL SeraphNameTagHookDispatch(JNIEnv* env, jclass, jobject player, j
 jstring JNICALL PublicWinsTabNameHookDispatch(JNIEnv* env, jclass, jobject networkInfo) {
     if (!env || !networkInfo) return nullptr;
     LONG dispatchNumber = InterlockedIncrement(&g_publicWinsTabDispatchCount);
-    SeraphPlayerIdentity identity = GetSeraphNetworkInfoIdentityForHook(env, networkInfo);
+    PlayerIdentity identity = GetNetworkInfoIdentityForHook(env, networkInfo);
     if (identity.name.empty()) {
         if (dispatchNumber <= 5) DebugLog("Public wins tab dispatch=%ld emptyIdentity", dispatchNumber);
         return env->NewStringUTF("");
@@ -12056,7 +11251,7 @@ jstring JNICALL PublicWinsScoreFormatHookDispatch(
 
     jmethodID formatMethod = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
         if (!g_publicWinsBaseTeamFormatName) {
             jclass baseTeamClass = FindClassLoose(env, "auq");
             if (baseTeamClass && !env->ExceptionCheck()) {
@@ -12122,7 +11317,7 @@ jstring JNICALL PublicWinsRenderedNameHookDispatch(JNIEnv* env, jclass, jobject 
     jmethodID getDisplayNameMethod = nullptr;
     jmethodID getFormattedTextMethod = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
         if (!g_publicWinsEntityGetName || !g_publicWinsEntityGetDisplayName) {
             jclass entityClass = FindClassLoose(env, "pr");
             if (entityClass && !env->ExceptionCheck()) {
@@ -12209,7 +11404,7 @@ jstring JNICALL PublicWinsRenderedComponentHookDispatch(JNIEnv* env, jclass, job
 
     jmethodID getFormattedTextMethod = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
         if (!g_publicWinsChatComponentGetFormattedText) {
             jclass componentClass = FindClassLoose(env, "eu");
             if (componentClass && !env->ExceptionCheck()) {
@@ -12265,7 +11460,7 @@ jstring JNICALL LunarRenderedComponentHookDispatch(
 
     jclass entityPlayerClass = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
         if (!g_lunarNametagEntityPlayerClass) {
             jclass localClass = FindClassLoose(env, "wn");
             if (localClass && !env->ExceptionCheck()) {
@@ -12304,7 +11499,7 @@ jstring JNICALL LunarRenderedComponentHookDispatch(
 
 bool EnsureLunarAdventureFormattingJni(JNIEnv* env) {
     if (!env) return false;
-    std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+    std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
     if (g_lunarAdventureComponentClass && g_lunarAdventureTextColorClass &&
         g_lunarAdventureComponentTextColored && g_lunarAdventureTextColorFromRgb &&
         g_lunarAdventureComponentAppend) {
@@ -12402,7 +11597,7 @@ jobject JNICALL LunarAdventureNameHookDispatch(
 
     jmethodID getDisplayNameComponent = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
         if (!g_lunarAdventureGetDisplayNameComponent) {
             jclass entityRuntimeClass = env->GetObjectClass(entity);
             if (entityRuntimeClass && !env->ExceptionCheck()) {
@@ -12427,7 +11622,7 @@ jobject JNICALL LunarAdventureNameHookDispatch(
 
     jclass entityPlayerClass = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
         if (!g_lunarNametagEntityPlayerClass) {
             jclass localClass = FindClassLoose(env, "wn");
             if (localClass && !env->ExceptionCheck()) {
@@ -12445,7 +11640,7 @@ jobject JNICALL LunarAdventureNameHookDispatch(
     jmethodID contentGet = nullptr;
     jmethodID contentSet = nullptr;
     {
-        std::lock_guard<std::mutex> lock(g_seraphNameTagJniMutex);
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
         if (!g_lunarAdventureTextContentGet || !g_lunarAdventureTextContentSet) {
             jclass componentRuntimeClass = env->GetObjectClass(component);
             if (componentRuntimeClass && !env->ExceptionCheck()) {
@@ -12536,7 +11731,7 @@ jobject JNICALL LunarAdventureNameHookDispatch(
     return patchedComponent;
 }
 
-std::vector<unsigned char> BuildSeraphNameTagHelperClassBytes() {
+std::vector<unsigned char> BuildNameTagHelperClassBytes() {
     std::vector<unsigned char> bytes;
     const std::string nameTagDescriptor = TranslateLunarDescriptor("(Lbet;Ljava/lang/String;)Ljava/lang/String;");
     const std::string tabNameDescriptor = TranslateLunarDescriptor("(Lbdc;)Ljava/lang/String;");
@@ -13088,9 +12283,9 @@ bool EnsurePublicWinsRenderedComponentHelper(JNIEnv* env) {
     return true;
 }
 
-bool EnsureSeraphNameTagHelper(JNIEnv* env) {
+bool EnsureNameTagHelper(JNIEnv* env) {
     if (!env) return false;
-    if (g_seraphNameTagHelperClass) return true;
+    if (g_nameTagHelperClass) return true;
 
     jclass helperClass = FindClassLoose(env, "TntTagNameDisplayHookV2");
     if (env->ExceptionCheck()) {
@@ -13100,11 +12295,11 @@ bool EnsureSeraphNameTagHelper(JNIEnv* env) {
     }
 
     if (!helperClass) {
-        jclass loaderSource = g_seraphRenderPlayerClass
-            ? g_seraphRenderPlayerClass
+        jclass loaderSource = g_nameTagRenderPlayerClass
+            ? g_nameTagRenderPlayerClass
             : g_publicWinsScorePlayerTeamClass;
         jobject loader = GetClassLoaderForClass(env, loaderSource);
-        std::vector<unsigned char> helperBytes = BuildSeraphNameTagHelperClassBytes();
+        std::vector<unsigned char> helperBytes = BuildNameTagHelperClassBytes();
         helperClass = env->DefineClass(
             "TntTagNameDisplayHookV2",
             loader,
@@ -13128,7 +12323,7 @@ bool EnsureSeraphNameTagHelper(JNIEnv* env) {
     const std::string tabNameDescriptor = TranslateLunarDescriptor("(Lbdc;)Ljava/lang/String;");
     methods[0].name = const_cast<char*>("a");
     methods[0].signature = const_cast<char*>(nameTagDescriptor.c_str());
-    methods[0].fnPtr = reinterpret_cast<void*>(&SeraphNameTagHookDispatch);
+    methods[0].fnPtr = reinterpret_cast<void*>(&NameTagHookDispatch);
     methods[1].name = const_cast<char*>("b");
     methods[1].signature = const_cast<char*>(tabNameDescriptor.c_str());
     methods[1].fnPtr = reinterpret_cast<void*>(&PublicWinsTabNameHookDispatch);
@@ -13143,12 +12338,12 @@ bool EnsureSeraphNameTagHelper(JNIEnv* env) {
         return false;
     }
 
-    g_seraphNameTagHelperClass = (jclass)env->NewGlobalRef(helperClass);
+    g_nameTagHelperClass = (jclass)env->NewGlobalRef(helperClass);
     env->DeleteLocalRef(helperClass);
-    if (!g_seraphNameTagHelperClass || env->ExceptionCheck()) {
+    if (!g_nameTagHelperClass || env->ExceptionCheck()) {
         if (env->ExceptionCheck()) env->ExceptionClear();
-        if (g_seraphNameTagHelperClass) env->DeleteGlobalRef(g_seraphNameTagHelperClass);
-        g_seraphNameTagHelperClass = nullptr;
+        if (g_nameTagHelperClass) env->DeleteGlobalRef(g_nameTagHelperClass);
+        g_nameTagHelperClass = nullptr;
         DebugLog("Name display hook failed global-ref helper");
         return false;
     }
@@ -13156,8 +12351,8 @@ bool EnsureSeraphNameTagHelper(JNIEnv* env) {
     return true;
 }
 
-bool LoadSeraphRenderPlayerClassBytes(JNIEnv* env, std::vector<unsigned char>& outBytes) {
-    return CaptureRuntimeClassBytes(env, g_seraphRenderPlayerClass, outBytes, "RenderPlayer bln");
+bool LoadNameTagRenderPlayerClassBytes(JNIEnv* env, std::vector<unsigned char>& outBytes) {
+    return CaptureRuntimeClassBytes(env, g_nameTagRenderPlayerClass, outBytes, "RenderPlayer bln");
 }
 
 bool ReadPayloadU2(const std::vector<unsigned char>& bytes, size_t offset, uint16_t& value) {
@@ -13179,7 +12374,7 @@ bool AddPayloadU2(std::vector<unsigned char>& bytes, size_t offset, uint16_t del
     return WritePayloadU2(bytes, offset, (uint16_t)(value + delta));
 }
 
-bool AdjustSeraphStackMapTable(std::vector<unsigned char>& payload, uint16_t insertLen) {
+bool AdjustNameTagStackMapTable(std::vector<unsigned char>& payload, uint16_t insertLen) {
     uint16_t entries = 0;
     if (!ReadPayloadU2(payload, 0, entries) || entries == 0 || payload.size() < 3) return true;
 
@@ -13222,7 +12417,7 @@ bool AdjustSeraphStackMapTable(std::vector<unsigned char>& payload, uint16_t ins
     return true;
 }
 
-bool AdjustSeraphLineNumberTable(std::vector<unsigned char>& payload, uint16_t insertLen) {
+bool AdjustNameTagLineNumberTable(std::vector<unsigned char>& payload, uint16_t insertLen) {
     uint16_t count = 0;
     if (!ReadPayloadU2(payload, 0, count)) return false;
     size_t offset = 2;
@@ -13234,7 +12429,7 @@ bool AdjustSeraphLineNumberTable(std::vector<unsigned char>& payload, uint16_t i
     return true;
 }
 
-bool AdjustSeraphLocalVariableTable(std::vector<unsigned char>& payload, uint16_t insertLen) {
+bool AdjustNameTagLocalVariableTable(std::vector<unsigned char>& payload, uint16_t insertLen) {
     uint16_t count = 0;
     if (!ReadPayloadU2(payload, 0, count)) return false;
     size_t offset = 2;
@@ -13408,13 +12603,13 @@ bool PatchPublicWinsApiTabRendererMethod(
                 const std::string nestedName = nestedNameIndex < utf8Constants.size()
                     ? utf8Constants[(size_t)nestedNameIndex] : std::string();
                 if (nestedName == "StackMapTable") {
-                    if (!AdjustSeraphStackMapTable(payload, insertLen)) return false;
+                    if (!AdjustNameTagStackMapTable(payload, insertLen)) return false;
                 }
                 else if (nestedName == "LineNumberTable") {
-                    if (!AdjustSeraphLineNumberTable(payload, insertLen)) return false;
+                    if (!AdjustNameTagLineNumberTable(payload, insertLen)) return false;
                 }
                 else if (nestedName == "LocalVariableTable" || nestedName == "LocalVariableTypeTable") {
-                    if (!AdjustSeraphLocalVariableTable(payload, insertLen)) return false;
+                    if (!AdjustNameTagLocalVariableTable(payload, insertLen)) return false;
                 }
 
                 AppendClassU2(codeAttribute, nestedNameIndex);
@@ -13442,7 +12637,7 @@ bool PatchPublicWinsApiTabRendererMethod(
     return false;
 }
 
-bool PatchSeraphRenderPlayerNameTagMethod(const std::vector<unsigned char>& originalBytes, std::vector<unsigned char>& patchedBytes) {
+bool PatchRenderPlayerNameTagMethod(const std::vector<unsigned char>& originalBytes, std::vector<unsigned char>& patchedBytes) {
     patchedBytes = originalBytes;
     const char* owner = "net/minecraft/client/renderer/entity/RenderPlayer";
     const char* mappedMethodName = IsLunarNamedClient()
@@ -13606,13 +12801,13 @@ bool PatchSeraphRenderPlayerNameTagMethod(const std::vector<unsigned char>& orig
                     std::string nestedName =
                         nestedNameIndex < utf8Constants.size() ? utf8Constants[(size_t)nestedNameIndex] : std::string();
                     if (nestedName == "StackMapTable") {
-                        if (!AdjustSeraphStackMapTable(payload, insertLen)) return false;
+                        if (!AdjustNameTagStackMapTable(payload, insertLen)) return false;
                     }
                     else if (nestedName == "LineNumberTable") {
-                        if (!AdjustSeraphLineNumberTable(payload, insertLen)) return false;
+                        if (!AdjustNameTagLineNumberTable(payload, insertLen)) return false;
                     }
                     else if (nestedName == "LocalVariableTable" || nestedName == "LocalVariableTypeTable") {
-                        if (!AdjustSeraphLocalVariableTable(payload, insertLen)) return false;
+                        if (!AdjustNameTagLocalVariableTable(payload, insertLen)) return false;
                     }
 
                     AppendClassU2(codeAttribute, nestedNameIndex);
@@ -13636,49 +12831,49 @@ bool PatchSeraphRenderPlayerNameTagMethod(const std::vector<unsigned char>& orig
     return false;
 }
 
-bool EnsureSeraphNameTagHook(JNIEnv* env) {
+bool EnsureNameTagHook(JNIEnv* env) {
     if (!env) return false;
-    if (g_seraphNameTagHookPatched) return true;
-    if (g_seraphNameTagHookFailed) return false;
+    if (g_nameTagHookPatched) return true;
+    if (g_nameTagHookFailed) return false;
 
     jclass renderPlayerClass = FindClassLoose(env, "bln");
     if (!renderPlayerClass || env->ExceptionCheck()) {
         if (env->ExceptionCheck()) env->ExceptionClear();
         if (renderPlayerClass) env->DeleteLocalRef(renderPlayerClass);
-        g_seraphNameTagHookFailed = true;
+        g_nameTagHookFailed = true;
         DebugLog("Name display hook failed finding RenderPlayer bln");
         return false;
     }
 
-    g_seraphRenderPlayerClass = (jclass)env->NewGlobalRef(renderPlayerClass);
+    g_nameTagRenderPlayerClass = (jclass)env->NewGlobalRef(renderPlayerClass);
     env->DeleteLocalRef(renderPlayerClass);
-    if (!g_seraphRenderPlayerClass || env->ExceptionCheck()) {
+    if (!g_nameTagRenderPlayerClass || env->ExceptionCheck()) {
         if (env->ExceptionCheck()) env->ExceptionClear();
-        g_seraphNameTagHookFailed = true;
+        g_nameTagHookFailed = true;
         DebugLog("Name display hook failed global-ref RenderPlayer");
         return false;
     }
 
-    if (!EnsureSeraphNameTagHelper(env) ||
-        !LoadSeraphRenderPlayerClassBytes(env, g_seraphOriginalRenderPlayerBytes) ||
-        !PatchSeraphRenderPlayerNameTagMethod(g_seraphOriginalRenderPlayerBytes, g_seraphPatchedRenderPlayerBytes) ||
-        !RedefineJavaClass(env, g_seraphRenderPlayerClass, g_seraphPatchedRenderPlayerBytes, "RenderPlayer name display")) {
-        g_seraphOriginalRenderPlayerBytes.clear();
-        g_seraphPatchedRenderPlayerBytes.clear();
-        g_seraphNameTagHookFailed = true;
+    if (!EnsureNameTagHelper(env) ||
+        !LoadNameTagRenderPlayerClassBytes(env, g_nameTagOriginalRenderPlayerBytes) ||
+        !PatchRenderPlayerNameTagMethod(g_nameTagOriginalRenderPlayerBytes, g_nameTagPatchedRenderPlayerBytes) ||
+        !RedefineJavaClass(env, g_nameTagRenderPlayerClass, g_nameTagPatchedRenderPlayerBytes, "RenderPlayer name display")) {
+        g_nameTagOriginalRenderPlayerBytes.clear();
+        g_nameTagPatchedRenderPlayerBytes.clear();
+        g_nameTagHookFailed = true;
         return false;
     }
 
-    g_seraphNameTagHookPatched = true;
+    g_nameTagHookPatched = true;
     DebugLog("Name display hook installed");
     return true;
 }
 
-void RestoreSeraphNameTagHook(JNIEnv* env) {
-    if (!env || !g_seraphNameTagHookPatched || !g_seraphRenderPlayerClass || g_seraphOriginalRenderPlayerBytes.empty()) return;
+void RestoreNameTagHook(JNIEnv* env) {
+    if (!env || !g_nameTagHookPatched || !g_nameTagRenderPlayerClass || g_nameTagOriginalRenderPlayerBytes.empty()) return;
 
-    if (RedefineJavaClass(env, g_seraphRenderPlayerClass, g_seraphOriginalRenderPlayerBytes, "RenderPlayer name display restore")) {
-        g_seraphNameTagHookPatched = false;
+    if (RedefineJavaClass(env, g_nameTagRenderPlayerClass, g_nameTagOriginalRenderPlayerBytes, "RenderPlayer name display restore")) {
+        g_nameTagHookPatched = false;
         DebugLog("Name display hook restored");
     }
 }
@@ -13688,7 +12883,7 @@ bool EnsurePublicWinsApiTabHook(JNIEnv* env) {
     if (IsLunarNamedClient()) return true;
     if (g_publicWinsApiTabHookPatched) return true;
     if (g_publicWinsApiTabHookFailed) return false;
-    if (!EnsureSeraphNameTagHook(env) || !EnsureSeraphNameTagHelper(env)) {
+    if (!EnsureNameTagHook(env) || !EnsureNameTagHelper(env)) {
         g_publicWinsApiTabHookFailed = true;
         return false;
     }
@@ -14301,7 +13496,7 @@ bool EnsurePublicWinsTabNameHook(JNIEnv* env) {
     if (!env) return false;
     if (g_publicWinsTabHookPatched) return true;
     if (g_publicWinsTabHookFailed) return false;
-    if (!EnsureSeraphNameTagHook(env) || !EnsureSeraphNameTagHelper(env)) {
+    if (!EnsureNameTagHook(env) || !EnsureNameTagHelper(env)) {
         g_publicWinsTabHookFailed = true;
         return false;
     }
@@ -14371,7 +13566,7 @@ void RestorePublicWinsTabNameHook(JNIEnv* env) {
     }
 
     // Public Wins shares the RenderPlayer name-display hook.
-    RestoreSeraphNameTagHook(env);
+    RestoreNameTagHook(env);
 }
 
 bool SetBlockDamageDispatcherPatch(JNIEnv* env, bool enabled) {
@@ -22616,7 +21811,7 @@ void RunLunarNametagTimerSmokeTest() {
 void ShutdownInjectedJavaCallbacks() {
     if (g_env) {
         jclass helperClasses[] = {
-            g_seraphNameTagHelperClass,
+            g_nameTagHelperClass,
             g_publicWinsScoreFormatHelperClass,
             g_publicWinsRenderedNameHelperClass,
             g_publicWinsRenderedComponentHelperClass,

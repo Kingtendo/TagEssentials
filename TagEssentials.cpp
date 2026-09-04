@@ -339,14 +339,7 @@ private:
     }
 };
 
-int main(int argc, char** argv) {
-    const bool silent = argc >= 2 && argv[1] && std::string(argv[1]) == "--silent";
-    if (TagEssentialsLauncher::Inject()) {
-        if (!silent) {
-            MessageBoxW(nullptr, L"TagEssentials loaded successfully.", L"TagEssentials",
-                MB_OK | MB_ICONINFORMATION);
-        }
-    }
-
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    TagEssentialsLauncher::Inject();
     return 0;
 }
