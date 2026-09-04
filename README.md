@@ -10,6 +10,13 @@ quality-of-life features without modifying the client installation on disk.
 > some features. Review the source, follow the rules of the services you use,
 > and run it at your own risk.
 
+## Source and downloads
+
+GitHub is the source-only distribution for TagEssentials. No prebuilt EXE is
+published through GitHub Releases; users can build the project using the steps
+below. A maintainer-provided Windows build and community support are available
+through the [PrimeTag Discord](https://discord.gg/primetag).
+
 ## Features
 
 - Configurable TNT countdown overlay, crosshair display, nametag timer, and
@@ -34,14 +41,19 @@ Client updates can change obfuscated classes and break compatibility. A build
 succeeding does not prove that every hook still works against a newly updated
 client.
 
+The current revision has been manually smoke-tested on both Badlion and Lunar
+Client with Minecraft 1.8.9.
+
 ## Build from source
 
 ```powershell
 git clone https://github.com/Kingtendo/TagEssentials.git
 cd TagEssentials
-npm ci
 msbuild .\TagEssentials.sln /m /p:Configuration=Release /p:Platform=x64
 ```
+
+Run the command from a Visual Studio 2022 Developer PowerShell so `msbuild` is
+available. Node.js is not required for the native launcher or mod build.
 
 The launcher is written to `x64\Release\TagEssentials.exe`; the injected module
 is embedded in it as a resource. The build vendors MinHook source so no opaque
@@ -59,7 +71,7 @@ Public Helpers client configuration is included only when a valid ignored
 
 ## Optional muted-voice helper
 
-The release directory contains `mutedVoiceBot.js`. Install its pinned runtime
+The build output directory contains `mutedVoiceBot.js`. Install its pinned runtime
 dependency in that directory before enabling the feature:
 
 ```powershell

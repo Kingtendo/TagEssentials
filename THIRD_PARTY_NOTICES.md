@@ -15,3 +15,6 @@ TagEssentials includes or uses the following third-party components:
 Minecraft, Microsoft, Hypixel, Badlion, and Lunar Client names and marks belong
 to their respective owners. Their inclusion describes compatibility only and
 does not imply endorsement.
+
+The TagEssentials icon and original UI/theme artwork under `assets/` are owned
+by the project author and distributed under the repository's MIT License.

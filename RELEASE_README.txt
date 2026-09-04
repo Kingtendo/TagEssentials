@@ -28,7 +28,11 @@ SECURITY AND COMPATIBILITY
 
 TagEssentials injects a DLL into a running Java process. Antivirus or SmartScreen
 may flag unsigned builds because injection is also used by malicious software.
-Download only from the official GitHub repository or build it yourself.
+Get maintainer-provided builds only through the PrimeTag Discord, or build the
+source yourself from the official GitHub repository:
+
+    https://discord.gg/primetag
+    https://github.com/Kingtendo/TagEssentials
 
 Client updates can break runtime mappings. This build targets Minecraft 1.8.9
 on current Badlion and Lunar clients. Use at your own risk and follow the rules
