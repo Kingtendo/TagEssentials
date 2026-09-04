@@ -1,0 +1,58 @@
+# Visual Studio and native build output
+.vs/
+**/.vs/
+x64/
+**/x64/
+obj/
+**/obj/
+Debug/
+Release/
+*.aps
+*.exp
+*.exe
+*.iobj
+*.ilk
+*.ipdb
+*.lib
+*.obj
+*.pdb
+*.suo
+*.tlog
+*.vcxproj.user
+
+# Release packages and downloaded/generated reverse-engineering data
+build/
+lunar-dump/
+mcp-1.8.9-srg/
+mcp-1.8.9-srg.zip
+*.zip
+injector/
+
+# Local analysis and agent tooling
+.agents/
+.analysis/
+.codex/
+.tools/
+.vendor-tmp/
+
+# Runtime state and credentials
+node_modules/
+**/node_modules/
+.mineflayer-auth/
+mutedVoiceBot.config.json
+mutedVoiceBot.log
+*.cfg
+*.log
+public_helpers_server.txt
+public-helpers-server/.env
+public-helpers-server/data/
+
+# Superseded local binary dependencies
+/InjectDLL.*
+/MinHook.h
+/libMinHook.x64.lib
+/TagEssentialsMod/MinHook.h
+/TagEssentialsMod/libMinHook.x64.lib
+/TagEssentialsMod/TagEssentialsMod.h
+/TagEssentialsMod/pfp.ico
+/TagEssentialsMod/MyCheatDLL/

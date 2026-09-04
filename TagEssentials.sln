@@ -1,0 +1,27 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36518.9
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "TagEssentials", "TagEssentials.vcxproj", "{9442C52D-0BB1-4986-9516-A22E9CE40C14}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "TagEssentialsMod", "TagEssentialsMod\TagEssentialsMod.vcxproj", "{FD620176-AD49-426C-A3E6-9B9BFDCBAC7E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{9442C52D-0BB1-4986-9516-A22E9CE40C14}.Debug|x64.ActiveCfg = Debug|x64
+		{9442C52D-0BB1-4986-9516-A22E9CE40C14}.Debug|x64.Build.0 = Debug|x64
+		{9442C52D-0BB1-4986-9516-A22E9CE40C14}.Release|x64.ActiveCfg = Release|x64
+		{9442C52D-0BB1-4986-9516-A22E9CE40C14}.Release|x64.Build.0 = Release|x64
+		{FD620176-AD49-426C-A3E6-9B9BFDCBAC7E}.Debug|x64.ActiveCfg = Debug|x64
+		{FD620176-AD49-426C-A3E6-9B9BFDCBAC7E}.Debug|x64.Build.0 = Debug|x64
+		{FD620176-AD49-426C-A3E6-9B9BFDCBAC7E}.Release|x64.ActiveCfg = Release|x64
+		{FD620176-AD49-426C-A3E6-9B9BFDCBAC7E}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

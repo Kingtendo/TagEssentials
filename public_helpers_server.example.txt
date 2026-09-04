@@ -1,0 +1,2 @@
+https://stats.example.com
+replace-with-the-same-public-helpers-token-as-the-server

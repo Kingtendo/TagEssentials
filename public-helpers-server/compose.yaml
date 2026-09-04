@@ -1,0 +1,37 @@
+services:
+  public-helpers:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      CACHE_FILE: /data/tnttag-wins-cache.json
+      TRUST_PROXY: 1
+    volumes:
+      - public_helpers_data:/data
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      PUBLIC_HELPERS_ADDRESS: ${PUBLIC_HELPERS_ADDRESS}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - internal
+
+networks:
+  internal:
+
+volumes:
+  public_helpers_data:
+  caddy_data:
+  caddy_config:

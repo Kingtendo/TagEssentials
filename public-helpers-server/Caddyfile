@@ -1,0 +1,14 @@
+{
+    default_sni {$PUBLIC_HELPERS_ADDRESS}
+}
+
+https://{$PUBLIC_HELPERS_ADDRESS} {
+    tls {
+        issuer acme {
+            profile shortlived
+        }
+    }
+
+    encode zstd gzip
+    reverse_proxy public-helpers:8080
+}
