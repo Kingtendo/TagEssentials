@@ -1,2 +1,2 @@
 https://stats.example.com
-replace-with-the-same-public-helpers-token-as-the-server
+replace_with_the_same_public_helpers_token_as_the_server

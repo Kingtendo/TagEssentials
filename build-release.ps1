@@ -62,6 +62,13 @@ Copy-Item -LiteralPath $runtimeScript -Destination (Join-Path $packageDirectory 
 Copy-Item -LiteralPath $releaseGuide -Destination (Join-Path $packageDirectory "README.txt") -Force
 Copy-Item -LiteralPath $packageManifest -Destination (Join-Path $packageDirectory "package.json") -Force
 Copy-Item -LiteralPath $packageLock -Destination (Join-Path $packageDirectory "package-lock.json") -Force
+Copy-Item -LiteralPath (Join-Path $projectDirectory "LICENSE") -Destination (Join-Path $packageDirectory "LICENSE") -Force
+Copy-Item -LiteralPath (Join-Path $projectDirectory "THIRD_PARTY_NOTICES.md") -Destination $packageDirectory -Force
+foreach ($component in @("minhook", "mcp")) {
+    $noticeDirectory = Join-Path $packageDirectory "third_party\$component"
+    New-Item -ItemType Directory -Path $noticeDirectory -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $projectDirectory "third_party\$component\LICENSE.txt") -Destination $noticeDirectory -Force
+}
 
 if (Test-Path -LiteralPath $publicHelpersConfig -PathType Leaf) {
     $publicHelpersLines = @(Get-Content -LiteralPath $publicHelpersConfig | ForEach-Object { $_.Trim() } | Where-Object { $_ })

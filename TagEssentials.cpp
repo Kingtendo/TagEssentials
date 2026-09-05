@@ -31,13 +31,16 @@ public:
             return false;
         }
 
-        bool success = PerformInjection(hProcess, stagedDllPath);
+        InjectionResult result = PerformInjection(hProcess, stagedDllPath);
         CloseHandle(hProcess);
-        if (!success) DeleteFileW(stagedDllPath.c_str());
-        return success;
+        // A pending loader still owns the path buffer and may open this file later.
+        if (result == InjectionResult::Failed) DeleteFileW(stagedDllPath.c_str());
+        return result == InjectionResult::Succeeded;
     }
 
 private:
+    enum class InjectionResult { Failed, Succeeded, Pending };
+
     static std::wstring GetStageDirectory() {
         wchar_t tempPath[MAX_PATH] = {};
         DWORD length = GetTempPathW(MAX_PATH, tempPath);
@@ -208,7 +211,7 @@ private:
 
         SYSTEMTIME st = {};
         GetLocalTime(&st);
-        DWORD tick = GetTickCount();
+        DWORD tick = static_cast<DWORD>(GetTickCount64() % 100000);
 
         wchar_t fileName[128] = {};
         swprintf_s(fileName, L"TagEssentialsMod_%04u%02u%02u_%02u%02u%02u_%05u.dll",
@@ -290,24 +293,29 @@ private:
         return bestScore >= 800 ? bestPid : 0;
     }
 
-    static bool PerformInjection(HANDLE hProcess, const std::wstring& dllPath) {
+    static InjectionResult PerformInjection(HANDLE hProcess, const std::wstring& dllPath) {
         size_t pathSize = (dllPath.length() + 1) * sizeof(wchar_t);
         LPVOID remoteMem = VirtualAllocEx(hProcess, NULL, pathSize,
             MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
         if (!remoteMem) {
             ShowError(L"Failed to allocate memory in target process");
-            return false;
+            return InjectionResult::Failed;
         }
 
         if (!WriteProcessMemory(hProcess, remoteMem, dllPath.c_str(), pathSize, NULL)) {
             ShowError(L"Failed to write DLL path to target process");
             VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
-            return false;
+            return InjectionResult::Failed;
         }
 
-        LPVOID loadLibAddr = GetProcAddress(GetModuleHandle(L"kernel32.dll"),
-            "LoadLibraryW");
+        HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+        LPVOID loadLibAddr = kernel32 ? GetProcAddress(kernel32, "LoadLibraryW") : nullptr;
+        if (!loadLibAddr) {
+            VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
+            ShowError(L"Failed to resolve LoadLibraryW.");
+            return InjectionResult::Failed;
+        }
 
         HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0,
             (LPTHREAD_START_ROUTINE)loadLibAddr,
@@ -315,11 +323,18 @@ private:
 
         bool success = false;
         if (hThread) {
-            WaitForSingleObject(hThread, 5000);
+            DWORD waitResult = WaitForSingleObject(hThread, 30000);
+            if (waitResult != WAIT_OBJECT_0) {
+                CloseHandle(hThread);
+                // Never free memory while the remote loader may still read it.
+                // The target process will reclaim it on exit.
+                ShowError(L"DLL loading has not been confirmed complete. It may still finish.\n"
+                    L"Do not launch TagEssentials again until Minecraft has been restarted.");
+                return InjectionResult::Pending;
+            }
 
             DWORD exitCode = 0;
-            GetExitCodeThread(hThread, &exitCode);
-            success = (exitCode != 0);
+            success = GetExitCodeThread(hThread, &exitCode) && exitCode != 0;
 
             CloseHandle(hThread);
         }
@@ -327,10 +342,11 @@ private:
         VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
 
         if (!success) {
-            ShowError(L"Injection failed!\nMake sure DLL is compiled for x64.");
+            ShowError(L"Injection failed. TagEssentials may already be loaded.\n"
+                L"If its window is not open, restart Minecraft and try again.");
         }
 
-        return success;
+        return success ? InjectionResult::Succeeded : InjectionResult::Failed;
     }
 
     static void ShowError(const std::wstring& message) {
@@ -339,7 +355,7 @@ private:
     }
 };
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int) {
     TagEssentialsLauncher::Inject();
     return 0;
 }

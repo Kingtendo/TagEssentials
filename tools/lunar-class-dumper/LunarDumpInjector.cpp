@@ -97,6 +97,7 @@ bool Inject(DWORD processId, const std::wstring& dllPath) {
     }
 
     bool success = false;
+    bool loaderFinished = true;
     if (WriteProcessMemory(process, remotePath, dllPath.c_str(), pathBytes, nullptr)) {
         HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
         auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(kernel32, "LoadLibraryW"));
@@ -105,6 +106,7 @@ bool Inject(DWORD processId, const std::wstring& dllPath) {
             : nullptr;
         if (thread) {
             const DWORD waitResult = WaitForSingleObject(thread, 15000);
+            loaderFinished = waitResult == WAIT_OBJECT_0;
             DWORD exitCode = 0;
             if (waitResult == WAIT_OBJECT_0 && GetExitCodeThread(thread, &exitCode) && exitCode != 0) {
                 success = true;
@@ -122,7 +124,9 @@ bool Inject(DWORD processId, const std::wstring& dllPath) {
         std::wcerr << L"WriteProcessMemory failed with Windows error " << GetLastError() << L".\n";
     }
 
-    VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
+    // On timeout or wait failure the loader may still read this path.
+    // The target process reclaims the allocation when it exits.
+    if (loaderFinished) VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
     CloseHandle(process);
     if (success) {
         std::wcout << L"DLL loaded into Lunar PID " << processId << L":\n  " << dllPath << L"\n";

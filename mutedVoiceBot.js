@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const DEFAULT_CONTROL_PORT = 49623;
 const DEFAULT_CONFIG = {
   host: 'mc.hypixel.net',
+  fallbackHost: process.env.MUTED_VOICE_FALLBACK_HOST || 'chi.free.overlag.link',
   minecraftPort: 25565,
   version: '1.8.9',
   auth: 'microsoft',
@@ -39,67 +40,35 @@ function log(message) {
     // Logging must never break the control server.
   }
 }
-function openExternalUrl(url) {
-    if (!url || typeof url !== 'string') return false;
-
-    try {
-        let child;
-
-        if (process.platform === 'win32') {
-            child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], {
-                detached: true,
-                stdio: 'ignore',
-                windowsHide: true
-            });
-        } else if (process.platform === 'darwin') {
-            child = spawn('open', [url], {
-                detached: true,
-                stdio: 'ignore'
-            });
-        } else {
-            child = spawn('xdg-open', [url], {
-                detached: true,
-                stdio: 'ignore'
-            });
-        }
-
-        child.unref();
-        return true;
-    } catch (error) {
-        log(`failed to open auth url: ${error.message}`);
-        return false;
-    }
+function openDesktopTarget(target, isUrl = false) {
+  if (typeof target !== 'string' || !target) return false;
+  const label = isUrl ? 'auth url' : 'config file';
+  const windows = process.platform === 'win32';
+  const command = windows
+    ? (isUrl ? 'rundll32.exe' : 'notepad.exe')
+    : (process.platform === 'darwin' ? 'open' : 'xdg-open');
+  const args = windows && isUrl ? ['url.dll,FileProtocolHandler', target] : [target];
+  try {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: isUrl
+    });
+    child.on('error', (error) => log(`failed to open ${label}: ${error.message}`));
+    child.unref();
+    return true;
+  } catch (error) {
+    log(`failed to open ${label}: ${error.message}`);
+    return false;
+  }
 }
+
+function openExternalUrl(url) {
+  return openDesktopTarget(url, true);
+}
+
 function openTextFile(filePath) {
-    if (!filePath || typeof filePath !== 'string') return false;
-
-    try {
-        let child;
-
-        if (process.platform === 'win32') {
-            child = spawn('notepad.exe', [filePath], {
-                detached: true,
-                stdio: 'ignore',
-                windowsHide: false
-            });
-        } else if (process.platform === 'darwin') {
-            child = spawn('open', [filePath], {
-                detached: true,
-                stdio: 'ignore'
-            });
-        } else {
-            child = spawn('xdg-open', [filePath], {
-                detached: true,
-                stdio: 'ignore'
-            });
-        }
-
-        child.unref();
-        return true;
-    } catch (error) {
-        log(`failed to open config file: ${error.message}`);
-        return false;
-    }
+  return openDesktopTarget(filePath);
 }
 
 function createDefaultConfig(configPath) {
@@ -108,6 +77,7 @@ function createDefaultConfig(configPath) {
         auth: "microsoft",
         flow: "live",
         host: "mc.hypixel.net",
+        fallbackHost: "chi.free.overlag.link",
         partyOwnerUsername: "",
         minecraftPort: 25565,
         version: "1.8.9",
@@ -147,16 +117,15 @@ function loadConfig() {
         }
     }
 
-    if (config.authTitle === 'Muted Voice') {
-        delete config.authTitle;
-    }
-    if (!config.authTitle) {
+    if (config.authTitle === 'Muted Voice' || !config.authTitle) {
         delete config.authTitle;
     }
 
     if (!Number.isFinite(config.chatDelayMs) || config.chatDelayMs < 0) config.chatDelayMs = DEFAULT_CONFIG.chatDelayMs;
     if (!Number.isFinite(config.partyAcceptDelayMs) || config.partyAcceptDelayMs < 0) config.partyAcceptDelayMs = DEFAULT_CONFIG.partyAcceptDelayMs;
     if (!Number.isInteger(config.maxChatQueue) || config.maxChatQueue < 1) config.maxChatQueue = DEFAULT_CONFIG.maxChatQueue;
+    config.host = String(config.host || DEFAULT_CONFIG.host).trim() || DEFAULT_CONFIG.host;
+    config.fallbackHost = String(config.fallbackHost || DEFAULT_CONFIG.fallbackHost).trim();
     config.partyOwnerUsername = normalizeMinecraftUsername(
         config.partyOwnerUsername || config.partyOwner || config.allowedPartyOwner || ''
     );
@@ -173,6 +142,7 @@ try {
 
 let config = loadConfig();
 let bot = null;
+let botGeneration = 0;
 let status = 'offline';
 let statusMessage = '';
 let stopping = false;
@@ -516,8 +486,17 @@ function reportPrivateMessage(jsonMsg) {
   log(`private message failed player=${failure.player} reason=${failure.message}`);
 }
 
-function createBot() {
-  config = loadConfig();
+function resetChatState() {
+  chatQueue = [];
+  recentPrivateMessages.clear();
+  recentPartyInviteAccepts.clear();
+  pendingPrivateSends.length = 0;
+  if (chatTimer) clearTimeout(chatTimer);
+  chatTimer = null;
+}
+
+function createBot(useFallback = false) {
+  if (!useFallback) config = loadConfig();
   if (!mineflayer) {
     clearAuthPrompt();
     setStatus('error', 'mineflayer is not installed; run npm install mineflayer');
@@ -553,14 +532,19 @@ function createBot() {
   }
 
   stopping = false;
-  chatQueue = [];
-  recentPrivateMessages.clear();
-  recentPartyInviteAccepts.clear();
-  pendingPrivateSends.length = 0;
-  setStatus('connecting');
+  resetChatState();
+  const primaryHost = config.host;
+  const fallbackHost = config.fallbackHost;
+  const targetHost = useFallback ? fallbackHost : primaryHost;
+  const canUseFallback = !useFallback && fallbackHost &&
+    fallbackHost.toLowerCase() !== primaryHost.toLowerCase();
+  const generation = ++botGeneration;
+  setStatus('connecting', useFallback ? `using fallback ${targetHost}` : '');
+  log(`connecting to ${targetHost}${useFallback ? ' (fallback)' : ' (primary)'}`);
 
+  try {
     bot = mineflayer.createBot({
-        host: config.host,
+        host: targetHost,
         port: config.minecraftPort,
         version: config.version,
         username: config.username,
@@ -569,6 +553,7 @@ function createBot() {
         authTitle: config.authTitle,
         profilesFolder: config.profilesFolder,
       onMsaCode: (data) => {
+          if (generation !== botGeneration || stopping) return;
           const code = data && (data.user_code || data.userCode || data.code);
 
           const url = data && (
@@ -585,55 +570,85 @@ function createBot() {
           log(`Microsoft auth prompt received codePresent=${code ? 'yes' : 'no'} urlPresent=${authUrl ? 'yes' : 'no'}`);
 
           const opened = openExternalUrl(authUrl);
+          const message = opened ? 'Microsoft sign in opened' : 'Microsoft sign in required';
           setAuthPrompt({
               code: code || '',
               url: authUrl,
-              message: opened
-                  ? 'Microsoft sign-in opened'
-                  : 'Microsoft sign-in required'
+              message
           });
-
-          if (opened) {
-              setStatus('connecting', 'Microsoft sign-in opened');
-          } else {
-              setStatus('connecting', 'Microsoft sign-in required');
-          }
+          setStatus('connecting', message);
       }
   });
+  } catch (error) {
+    bot = null;
+    ++botGeneration;
+    clearAuthPrompt();
+    setStatus('error', `connection failed: ${error.message}`);
+    return;
+  }
+
+  const currentBot = bot;
+  const isCurrent = () => bot === currentBot && generation === botGeneration;
+  let loggedIn = false;
+  let kicked = false;
+
+  const retryWithFallback = (reason) => {
+    if (!isCurrent() || stopping || loggedIn || kicked || !canUseFallback) return false;
+
+    bot = null;
+    ++botGeneration;
+    resetChatState();
+    clearAuthPrompt();
+    try {
+      currentBot.end();
+    } catch (_) {
+      // The failed primary connection may already be closed.
+    }
+
+    const detail = reason ? `: ${String(reason)}` : '';
+    log(`connection to ${targetHost} failed before login${detail}; retrying via ${fallbackHost}`);
+    createBot(true);
+    return true;
+  };
 
   bot.once('login', () => {
+    if (!isCurrent() || stopping) return;
+    loggedIn = true;
     clearAuthPrompt();
     setStatus('online');
   });
   bot.once('spawn', () => {
+    if (!isCurrent() || stopping) return;
     if (status !== 'inParty') setStatus('online');
-    bot.clearControlStates();
+    currentBot.clearControlStates();
   });
   bot.on('message', (jsonMsg) => {
+    if (!isCurrent() || stopping) return;
     acceptPartyInvite(jsonMsg);
     reportPrivateMessage(jsonMsg);
   });
   bot.on('kicked', (reason) => {
+    if (!isCurrent() || stopping) return;
+    kicked = true;
     const text = typeof reason === 'string' ? reason : JSON.stringify(reason);
     clearAuthPrompt();
     setStatus('error', `kicked: ${text}`);
     log(`kicked: ${text}`);
   });
   bot.on('error', (error) => {
+    if (!isCurrent() || stopping) return;
+    log(`bot error host=${targetHost}: ${error.stack || error.message}`);
+    if (retryWithFallback(error.message)) return;
     clearAuthPrompt();
     setStatus('error', error.message);
-    log(`bot error: ${error.stack || error.message}`);
   });
   bot.on('end', (reason) => {
+    if (!isCurrent()) return;
+    if (retryWithFallback(reason || 'disconnected')) return;
     bot = null;
-    chatQueue = [];
-    recentPrivateMessages.clear();
-    recentPartyInviteAccepts.clear();
-    pendingPrivateSends.length = 0;
-    if (chatTimer) {
-      clearTimeout(chatTimer);
-      chatTimer = null;
-    }
+    ++botGeneration;
+    resetChatState();
+    clearAuthPrompt();
     if (stopping) setStatus('offline');
     else setStatus('offline', reason ? String(reason) : 'disconnected');
   });
@@ -644,89 +659,42 @@ function reportAllStatus() {
   if (latestAuthPrompt) broadcast({ type: 'auth', ...latestAuthPrompt });
 }
 
-function stopBot() {
+function stopBot(force = false) {
   stopping = true;
-  chatQueue = [];
-  recentPrivateMessages.clear();
-  recentPartyInviteAccepts.clear();
-  pendingPrivateSends.length = 0;
-  if (chatTimer) {
-    clearTimeout(chatTimer);
-    chatTimer = null;
-  }
+  resetChatState();
+  clearAuthPrompt();
 
-  if (!bot) {
-    clearAuthPrompt();
+  const currentBot = bot;
+  if (!currentBot) {
     setStatus('offline');
     return;
   }
 
+  if (force) {
+    bot = null;
+    ++botGeneration;
+  }
   try {
-    bot.quit();
+    currentBot.quit();
   } catch (error) {
     log(`bot quit error: ${error.message}`);
+    force = true;
+    bot = null;
+    ++botGeneration;
+  }
+  if (force) {
     try {
-      bot.end();
+      currentBot.end();
     } catch (_) {
       // Ignore secondary shutdown failures.
     }
-    bot = null;
-    clearAuthPrompt();
     setStatus('offline');
   }
 }
 
-function removePathRecursive(targetPath) {
-  if (!targetPath || typeof targetPath !== 'string') return;
-
-  if (typeof fs.rmSync === 'function') {
-    fs.rmSync(targetPath, { recursive: true, force: true });
-    return;
-  }
-
-  if (!fs.existsSync(targetPath)) return;
-  const stat = fs.lstatSync(targetPath);
-  if (!stat.isDirectory()) {
-    fs.unlinkSync(targetPath);
-    return;
-  }
-
-  for (const entry of fs.readdirSync(targetPath)) {
-    removePathRecursive(path.join(targetPath, entry));
-  }
-  fs.rmdirSync(targetPath);
-}
-
-function disconnectBotForSignOut() {
-  stopping = true;
-  chatQueue = [];
-  recentPrivateMessages.clear();
-  recentPartyInviteAccepts.clear();
-  pendingPrivateSends.length = 0;
-  if (chatTimer) {
-    clearTimeout(chatTimer);
-    chatTimer = null;
-  }
-
-  if (!bot) return;
-
-  const currentBot = bot;
-  bot = null;
-  try {
-    currentBot.quit();
-  } catch (_) {
-    // Continue with the local cache cleanup.
-  }
-  try {
-    if (typeof currentBot.end === 'function') currentBot.end();
-  } catch (_) {
-    // Continue with the local cache cleanup.
-  }
-}
 
 function signOut() {
-  disconnectBotForSignOut();
-  clearAuthPrompt();
+  stopBot(true);
 
   try {
     const resolvedProfilesFolder = path.resolve(config.profilesFolder);
@@ -734,7 +702,7 @@ function signOut() {
       throw new Error('refusing to delete unexpected auth cache path');
     }
 
-    removePathRecursive(resolvedProfilesFolder);
+    fs.rmSync(resolvedProfilesFolder, { recursive: true, force: true });
     log('auth cache removed for sign out');
     setStatus('offline', 'signed out');
     return { ok: true, message: 'signed out' };
@@ -800,6 +768,10 @@ const server = net.createServer((socket) => {
   let buffer = '';
   socket.on('data', (chunk) => {
     buffer += chunk;
+    if (buffer.length > 64 * 1024) {
+      socket.destroy();
+      return;
+    }
     let newline = buffer.indexOf('\n');
     while (newline !== -1) {
       const line = buffer.slice(0, newline).trim();

@@ -1,4 +1,4 @@
-# Lunar class-dump diagnostics
+# Lunar class dump diagnostics
 
 These two Visual Studio projects are maintainer diagnostics for investigating
 Lunar Client mapping changes. They are not required to build or run
@@ -10,5 +10,5 @@ client build, and are not part of this project's source distribution.
 
 Build both projects as Release x64, start Lunar Client 1.8.9 and TagEssentials,
 then run `LunarDumpInjector.exe` from `lunar-dump/tools`. Review all captured
-material before sharing it and never collect account, session, or access-token
+material before sharing it and never collect account, session, or access token
 data.

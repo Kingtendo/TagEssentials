@@ -11,5 +11,5 @@ Before opening a pull request:
 4. Describe which Minecraft client and version you tested.
 
 Keep changes scoped and explain any new network requests or runtime hooks in the
-pull request. Features intended to evade anti-cheat or bypass access controls are
+pull request. Features intended to evade anti cheat or bypass access controls are
 out of scope.

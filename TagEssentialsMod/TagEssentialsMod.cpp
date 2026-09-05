@@ -84,6 +84,7 @@ SRWLOCK g_debugLogLock = SRWLOCK_INIT;
 char g_debugLogPath[MAX_PATH] = {};
 LPTOP_LEVEL_EXCEPTION_FILTER g_prevUnhandledExceptionFilter = nullptr;
 HMODULE g_moduleHandle = nullptr;
+HANDLE g_moduleInstanceMutex = nullptr;
 ULONG_PTR g_cosmicGdiplusToken = 0;
 Gdiplus::Bitmap* g_themeBackgroundImages[6] = {};
 Gdiplus::Bitmap* g_themeMotionSprites[6] = {};
@@ -121,6 +122,11 @@ constexpr int kTimerNumberMin = 0;
 constexpr int kTimerNumberMax = 55;
 constexpr int kTimerNumberCount = kTimerNumberMax - kTimerNumberMin + 1;
 constexpr double kBetweenRoundTimerSeconds = 10.5;
+constexpr double kRoundEndLeadDefaultSeconds = 0.24;
+constexpr double kRoundEndLeadMaximumSeconds = 0.75;
+constexpr double kBetweenRoundMinimumSeconds = 8.0;
+constexpr double kBetweenRoundMaximumSeconds = 14.0;
+constexpr size_t kRoundTimingSampleLimit = 9;
 constexpr float kAlertVolumeMin = 0.00f;
 constexpr float kAlertVolumeMax = 2.00f;
 constexpr ULONGLONG kChatAlertPollIntervalMs = 75;
@@ -128,17 +134,12 @@ constexpr int kChatAlertSnapshotLimit = 12;
 constexpr ULONGLONG kSpeedTransitionDiagnosticPollIntervalMs = 10;
 constexpr ULONGLONG kSpeedTransitionDiagnosticSampleIntervalMs = 50;
 constexpr ULONGLONG kSpeedTransitionDiagnosticCaptureMs = 1200;
-constexpr int kSeeBarriersRangeMin = 5;
-constexpr int kSeeBarriersRangeMax = 30;
-constexpr int kSeeBarriersRangeInfinite = 31;
-constexpr int kSeeBarriersRangeDefault = 16;
-constexpr int kSeeBarriersDirtBlockId = 3;
 constexpr unsigned short kMutedVoiceControlPort = 49623;
 constexpr const char* kMutedVoiceScriptName = "mutedVoiceBot.js";
 constexpr const char* kMutedVoiceRuntimeDirFile = "muted_voice_runtime_dir.txt";
 constexpr const char* kPublicHelpersServerConfigFile = "public_helpers_server.txt";
 constexpr const char* kHypixelWinsCacheFile = "hypixel_tnttag_wins_cache.cfg";
-constexpr ULONGLONG kHypixelWinsCacheTtlMs = 60ULL * 60ULL * 1000ULL;
+constexpr ULONGLONG kHypixelWinsCacheTtlMs = 30ULL * 60ULL * 1000ULL;
 constexpr ULONGLONG kHypixelWinsFailureRetryMs = 2ULL * 60ULL * 1000ULL;
 constexpr ULONGLONG kTntTagContextGraceMs = 2000ULL;
 
@@ -198,11 +199,6 @@ static const std::array<MinecraftColourOption, 16> kMinecraftColourOptions = { {
     { 'e', "Yellow",      255, 255,  85 },
     { 'f', "White",       255, 255, 255 }
 } };
-
-enum SeeBarriersRenderStyle {
-    SEE_BARRIERS_STYLE_BOX_OUTLINE = 0,
-    SEE_BARRIERS_STYLE_OUTLINE = 1
-};
 
 enum AlertSoundId {
     ALERT_SOUND_NOTE_PLING = 0,
@@ -356,7 +352,7 @@ static const AlertSoundOption kAlertSoundOptions[] = {
     { "mob.horse.jump", "Horse Jump" },
     { "mob.horse.gallop", "Horse Gallop" },
     { "mob.horse.death", "Horse Death" },
-    { "mob.horse.donkey.idle", "Donkey Hee-Haw" },
+    { "mob.horse.donkey.idle", "Donkey Hee Haw" },
     { "mob.irongolem.throw", "Iron Golem Throw" },
     { "mob.irongolem.walk", "Iron Golem Walk" },
     { "mob.irongolem.hit", "Iron Golem Hurt" },
@@ -446,6 +442,11 @@ enum TimerNametagPosition {
     TIMER_NAMETAG_POSITION_SUFFIX = 1
 };
 
+enum PrefixTntTagPlacement {
+    PREFIX_TNT_TAG_PLACEMENT_BEFORE = 0,
+    PREFIX_TNT_TAG_PLACEMENT_AFTER = 1
+};
+
 int g_guiTheme = GUI_THEME_COSMIC;
 
 int NormalizeGuiTheme(int value) {
@@ -472,7 +473,7 @@ const char* GetGuiThemeSubtitle(int theme) {
     switch (NormalizeGuiTheme(theme)) {
     case GUI_THEME_CLASSIC: return "Original dark interface";
     case GUI_THEME_COSMIC: return "Galaxy and orbiting planets";
-    case GUI_THEME_NEON_CITY: return "Rainy cyan-magenta skyline";
+    case GUI_THEME_NEON_CITY: return "Rainy cyan magenta skyline";
     case GUI_THEME_ENCHANTED_FOREST: return "Fireflies in moonlit woodland";
     case GUI_THEME_INFERNO: return "Lava flows and rising embers";
     case GUI_THEME_ARCTIC_AURORA: return "Aurora light and layered blizzards";
@@ -486,6 +487,7 @@ bool g_guiTimerEnabled = true;
 bool g_guiTimerLocked = false;
 bool g_guiTimerNametagEnabled = true;
 int  g_guiTimerNametagPosition = TIMER_NAMETAG_POSITION_SUFFIX;
+int  g_guiTimerPrefixTntTagPlacement = PREFIX_TNT_TAG_PLACEMENT_BEFORE;
 bool g_guiTimerEditDefaultScoreboard = false;
 bool g_guiTimerCrosshairMode = false;
 bool g_guiTimerObsScreenshotsEnabled = false;
@@ -499,19 +501,16 @@ float g_speed3Volume = 1.0f;
 float g_slownessVolume = 1.0f;
 bool g_guiPublicWinsEnabled = false;
 int  g_guiPublicWinsPosition = PUBLIC_WINS_POSITION_PREFIX;
+int  g_guiPublicWinsPrefixTntTagPlacement = PREFIX_TNT_TAG_PLACEMENT_AFTER;
 bool g_guiPublicWinsSpaceBetweenUsername = false;
-
 
 // Add these:
 bool g_guiExtrasForceWheatStage1 = false;
 bool g_guiExtrasHideBeaconBeams = false;
 bool g_guiExtrasDisableTagScoreboard = false;
-bool g_guiExtrasSeeBarriers = false;
 bool g_guiExtrasMutedVoice = false;
 bool g_guiExtrasMutedVoiceHideMuteReminder = false;
 std::string g_guiMutedVoicePartyOwner;
-int  g_guiSeeBarriersRange = kSeeBarriersRangeDefault;
-int  g_guiSeeBarriersStyle = SEE_BARRIERS_STYLE_BOX_OUTLINE;
 
 LARGE_INTEGER g_perfFreq;
 LARGE_INTEGER g_explosionSetAt;
@@ -521,6 +520,17 @@ bool g_betweenRoundsTimerActive = false;
 bool g_roundTimerObserved = false;
 ULONGLONG g_betweenRoundsStartedAtMs = 0;
 ULONGLONG g_lastRoundTimerSeenMs = 0;
+std::vector<double> g_roundEndLeadSamples;
+std::vector<double> g_betweenRoundDurationSamples;
+double g_roundEndLeadSeconds = kRoundEndLeadDefaultSeconds;
+double g_betweenRoundDurationSeconds = kBetweenRoundTimerSeconds;
+ULONGLONG g_roundTimingActiveStartedMs = 0;
+ULONGLONG g_roundTimingLastSecondMs = 0;
+int g_roundTimingLastSecond = -1;
+int g_roundTimingDescendingTicks = 0;
+int g_roundTimingSequence = 0;
+int g_roundTimingScoreboardRound = -1;
+std::string g_roundTimingMap;
 volatile LONG g_tntTagGameActive = 0;
 volatile LONG g_hypixelTntTagGameActive = 0;
 ULONGLONG g_lastTntTagContextSeenMs = 0;
@@ -531,8 +541,12 @@ ULONGLONG g_lastDefaultScoreboardTimerUpdateMs = 0;
 bool g_lastDefaultScoreboardBetweenRounds = false;
 
 struct TeamSuffixState {
+    std::string basePrefix;
     std::string baseSuffix;
+    std::string appliedPrefix;
     std::string appliedSuffix;
+    std::string appliedTimerPrefix;
+    std::string appliedTimerSuffix;
 };
 
 std::unordered_map<std::string, TeamSuffixState> g_teamSuffixCache;
@@ -560,6 +574,20 @@ struct PublicWinsTeamFormatState {
 
 std::unordered_map<std::string, PublicWinsTeamFormatState> g_publicWinsTeamFormatCache;
 ULONGLONG g_lastPublicWinsTeamUpdateMs = 0;
+
+struct PublicWinsCachedPlayerNameState {
+    jobject player = nullptr;
+    std::string baseFormattedName;
+};
+
+std::unordered_map<std::string, PublicWinsCachedPlayerNameState> g_publicWinsCachedPlayerNames;
+
+struct PublicWinsCachedTabNameState {
+    jobject networkInfo = nullptr;
+    std::string baseFormattedName;
+};
+
+std::unordered_map<std::string, PublicWinsCachedTabNameState> g_publicWinsCachedTabNames;
 
 // Snaplook state
 bool g_snaplookActive = false;
@@ -598,6 +626,12 @@ int NormalizeTimerNametagPosition(int value) {
     return value == TIMER_NAMETAG_POSITION_PREFIX
         ? TIMER_NAMETAG_POSITION_PREFIX
         : TIMER_NAMETAG_POSITION_SUFFIX;
+}
+
+int NormalizePrefixTntTagPlacement(int value) {
+    return value == PREFIX_TNT_TAG_PLACEMENT_BEFORE
+        ? PREFIX_TNT_TAG_PLACEMENT_BEFORE
+        : PREFIX_TNT_TAG_PLACEMENT_AFTER;
 }
 
 std::uint32_t GetTimerNumberColour(int number) {
@@ -644,7 +678,6 @@ void SaveToolSettings();
 void SetMutedVoiceModuleEnabled(bool enabled);
 bool QueueMutedVoiceChatMessage(const std::string& message);
 bool QueueMutedVoiceControlCommand(const std::string& command);
-std::string GetMutedVoiceStatusText();
 void BeginMutedVoiceSignOut();
 void OpenMutedVoiceAuthUrl();
 void CopyMutedVoiceAuthCode();
@@ -654,15 +687,21 @@ bool EnsureNameTagHook(JNIEnv* env);
 void RestoreNameTagHook(JNIEnv* env);
 void SetPublicWinsEnabled(bool enabled);
 void StartPublicWinsWorker();
-void StopPublicWinsWorker();
+bool StopPublicWinsWorker(DWORD timeoutMs = 5000);
 bool EnsurePublicWinsTabNameHook(JNIEnv* env);
-bool EnsurePublicWinsApiTabHook(JNIEnv* env);
 bool EnsurePublicWinsScoreboardFormatHook(JNIEnv* env);
 bool EnsurePublicWinsRenderedNameHook(JNIEnv* env);
 void RestorePublicWinsTabNameHook(JNIEnv* env);
 bool CaptureRuntimeClassBytes(JNIEnv* env, jclass targetClass, std::vector<unsigned char>& outBytes, const char* label);
 void QueuePublicWinsForWorldPlayers();
 void ApplyPublicWinsToPlayerTeams(bool enablePublicWins);
+void ApplyPublicWinsToPlayerNameCaches(bool enablePublicWins);
+void ApplyPublicWinsToTabNameCaches(bool enablePublicWins);
+std::string GetVanillaTabDisplayName(
+    JNIEnv* env,
+    jobject networkInfo,
+    const std::string& profileName);
+std::string RestoreMinecraftFormatStateAtEnd(const std::string& value);
 bool IsLunarNamedClient();
 
 bool IsPerspectiveModuleEnabled() {
@@ -780,6 +819,9 @@ enum MutedVoiceBotStatus {
 };
 
 std::mutex g_mutedVoiceMutex;
+std::mutex g_mutedVoiceLifecycleMutex;
+std::mutex g_mutedVoiceSignOutLifecycleMutex;
+HANDLE g_mutedVoiceSignOutThreadHandle = nullptr;
 MutedVoiceBotStatus g_mutedVoiceStatus = MUTED_VOICE_STATUS_OFFLINE;
 std::string g_mutedVoiceStatusDetail;
 std::string g_mutedVoiceAuthCode;
@@ -835,11 +877,6 @@ void SetMutedVoiceStatus(MutedVoiceBotStatus status, const std::string& detail =
         DebugLog("Muted Voice status=%s detailPresent=%d", MutedVoiceStatusName(status), detail.empty() ? 0 : 1);
         RequestGuiRepaint();
     }
-}
-
-std::string GetMutedVoiceStatusText() {
-    std::lock_guard<std::mutex> lock(g_mutedVoiceMutex);
-    return MutedVoiceStatusName(g_mutedVoiceStatus);
 }
 
 struct MutedVoiceGuiSnapshot {
@@ -947,7 +984,7 @@ std::string GetModuleDirectoryA(HMODULE module) {
     return DirectoryFromPathA(path);
 }
 
-void AddMutedVoiceCandidateDir(std::vector<std::string>& dirs, const std::string& dir) {
+void AddRuntimeCandidateDir(std::vector<std::string>& dirs, const std::string& dir) {
     if (dir.empty()) return;
     for (const std::string& existing : dirs) {
         if (_stricmp(existing.c_str(), dir.c_str()) == 0) return;
@@ -971,16 +1008,16 @@ bool ResolveMutedVoiceRuntime(std::string& workingDir, std::string& scriptPath) 
     std::string moduleDir = GetModuleDirectoryA(g_moduleHandle);
     std::string stagedRuntimeDir;
     if (ReadMutedVoiceRuntimeDir(moduleDir, stagedRuntimeDir)) {
-        AddMutedVoiceCandidateDir(candidates, stagedRuntimeDir);
+        AddRuntimeCandidateDir(candidates, stagedRuntimeDir);
     }
 
-    AddMutedVoiceCandidateDir(candidates, GetModuleDirectoryA(nullptr));
-    AddMutedVoiceCandidateDir(candidates, moduleDir);
+    AddRuntimeCandidateDir(candidates, GetModuleDirectoryA(nullptr));
+    AddRuntimeCandidateDir(candidates, moduleDir);
 
     char cwd[MAX_PATH] = {};
     DWORD cwdLength = GetCurrentDirectoryA(MAX_PATH, cwd);
     if (cwdLength > 0 && cwdLength < MAX_PATH) {
-        AddMutedVoiceCandidateDir(candidates, cwd);
+        AddRuntimeCandidateDir(candidates, cwd);
     }
 
     for (const std::string& dir : candidates) {
@@ -1015,24 +1052,12 @@ bool IsUuidLookupId(const std::string& value) {
     return true;
 }
 
-std::string NormalizePlayerKey(const std::string& player) {
-    return ToLowerAscii(TrimAscii(player));
-}
-
 bool IsSafeSingleLineConfigValue(const std::string& value) {
     if (value.empty()) return false;
     for (char ch : value) {
         if (ch == '\r' || ch == '\n') return false;
     }
     return true;
-}
-
-void AddRuntimeCandidateDir(std::vector<std::string>& dirs, const std::string& dir) {
-    if (dir.empty()) return;
-    for (const std::string& existing : dirs) {
-        if (_stricmp(existing.c_str(), dir.c_str()) == 0) return;
-    }
-    dirs.push_back(dir);
 }
 
 std::vector<std::string> GetRuntimeConfigCandidateDirs() {
@@ -1051,7 +1076,6 @@ std::vector<std::string> GetRuntimeConfigCandidateDirs() {
     if (cwdLength > 0 && cwdLength < MAX_PATH) AddRuntimeCandidateDir(dirs, cwd);
     return dirs;
 }
-
 
 std::wstring Utf8ToWide(const std::string& value) {
     if (value.empty()) return L"";
@@ -1105,38 +1129,6 @@ bool FindJsonKeyValueStart(const std::string& json, const char* key, size_t star
     return false;
 }
 
-bool FindJsonObjectRange(const std::string& json, const char* key, size_t start, size_t end, size_t& objStart, size_t& objEnd) {
-    size_t valueStart = 0;
-    if (!FindJsonKeyValueStart(json, key, start, end, valueStart)) return false;
-    if (valueStart >= json.size() || json[valueStart] != '{') return false;
-
-    bool inString = false;
-    bool escaped = false;
-    int depth = 0;
-    for (size_t i = valueStart; i < json.size(); ++i) {
-        char ch = json[i];
-        if (inString) {
-            if (escaped) escaped = false;
-            else if (ch == '\\') escaped = true;
-            else if (ch == '"') inString = false;
-            continue;
-        }
-
-        if (ch == '"') inString = true;
-        else if (ch == '{') ++depth;
-        else if (ch == '}') {
-            --depth;
-            if (depth == 0) {
-                objStart = valueStart;
-                objEnd = i + 1;
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
 bool JsonBoolInRange(const std::string& json, size_t start, size_t end, const char* key, bool& value) {
     size_t valueStart = 0;
     if (!FindJsonKeyValueStart(json, key, start, end, valueStart)) return false;
@@ -1148,44 +1140,6 @@ bool JsonBoolInRange(const std::string& json, size_t start, size_t end, const ch
         value = false;
         return true;
     }
-    return false;
-}
-
-bool JsonStringInRange(const std::string& json, size_t start, size_t end, const char* key, std::string& value) {
-    size_t valueStart = 0;
-    if (!FindJsonKeyValueStart(json, key, start, end, valueStart)) return false;
-    if (valueStart >= end || valueStart >= json.size() || json[valueStart] != '"') return false;
-
-    std::string result;
-    bool escaped = false;
-    for (size_t i = valueStart + 1; i < json.size() && i < end; ++i) {
-        char ch = json[i];
-        if (escaped) {
-            switch (ch) {
-            case 'n': result.push_back('\n'); break;
-            case 'r': result.push_back('\r'); break;
-            case 't': result.push_back('\t'); break;
-            case 'b': result.push_back('\b'); break;
-            case 'f': result.push_back('\f'); break;
-            case '"': result.push_back('"'); break;
-            case '\\': result.push_back('\\'); break;
-            case '/': result.push_back('/'); break;
-            default: result.push_back(ch); break;
-            }
-            escaped = false;
-            continue;
-        }
-        if (ch == '\\') {
-            escaped = true;
-            continue;
-        }
-        if (ch == '"') {
-            value = result;
-            return true;
-        }
-        result.push_back(ch);
-    }
-
     return false;
 }
 
@@ -1208,21 +1162,25 @@ bool JsonUnsignedLongLongInRange(const std::string& json, size_t start, size_t e
 
 bool WinHttpReadAll(HINTERNET request, std::string& response) {
     response.clear();
+    constexpr size_t maxResponseBytes = 1024 * 1024;
+    std::array<char, 8192> buffer;
 
     for (;;) {
         DWORD available = 0;
         if (!WinHttpQueryDataAvailable(request, &available)) return false;
         if (available == 0) return true;
 
-        std::vector<char> buffer(available);
+        if (available > maxResponseBytes - response.size()) {
+            SetLastError(ERROR_FILE_TOO_LARGE);
+            return false;
+        }
         DWORD read = 0;
-        if (!WinHttpReadData(request, buffer.data(), available, &read)) return false;
+        DWORD toRead = (std::min)(available, (DWORD)buffer.size());
+        if (!WinHttpReadData(request, buffer.data(), toRead, &read)) return false;
         if (read == 0) return true;
         response.append(buffer.data(), buffer.data() + read);
-        if (response.size() > 1024 * 1024) return false;
     }
 }
-
 
 // =============================================================
 // Public Helpers - Hypixel TNT Tag wins
@@ -1234,10 +1192,17 @@ enum PublicWinsFetchResult {
     PUBLIC_WINS_FETCH_FORBIDDEN
 };
 
+enum PublicWinsCachedResult {
+    PUBLIC_WINS_CACHED_NONE = 0,
+    PUBLIC_WINS_CACHED_AVAILABLE,
+    PUBLIC_WINS_CACHED_NICKED
+};
+
 struct PublicWinsCacheEntry {
     bool fetching = false;
     bool hasDefinitiveResult = false;
     bool available = false;
+    bool nicked = false;
     unsigned long long wins = 0;
     unsigned long long fetchedEpochMs = 0;
     ULONGLONG nextFetchTickMs = 0;
@@ -1250,6 +1215,7 @@ struct PublicWinsLookupRequest {
 };
 
 std::mutex g_publicWinsMutex;
+std::mutex g_publicWinsLifecycleMutex;
 std::unordered_map<std::string, PublicWinsCacheEntry> g_publicWinsCache;
 std::deque<PublicWinsLookupRequest> g_publicWinsQueue;
 std::unordered_set<std::string> g_publicWinsQueuedUuids;
@@ -1348,24 +1314,27 @@ void LoadPublicWinsCacheIfNeeded(const std::string& runtimeDir) {
 
     std::string header;
     std::getline(f, header);
-    if (TrimAscii(header) != "public_wins_cache_version 1") return;
+    if (TrimAscii(header) != "public_wins_cache_version 3") return;
 
     std::unordered_map<std::string, PublicWinsCacheEntry> loaded;
     std::string uuid;
     unsigned long long fetchedEpochMs = 0;
     int available = 0;
+    int nicked = 0;
     unsigned long long wins = 0;
     std::string displayName;
     unsigned long long nowEpochMs = GetUnixEpochMilliseconds();
-    while (f >> uuid >> fetchedEpochMs >> available >> wins >> displayName) {
+    while (f >> uuid >> fetchedEpochMs >> available >> nicked >> wins >> displayName) {
         uuid = NormalizePublicWinsUuid(uuid);
         if (uuid.empty() || fetchedEpochMs == 0 || fetchedEpochMs > nowEpochMs + 5ULL * 60ULL * 1000ULL) continue;
         if (displayName == "-") displayName.clear();
-        if (available != 0 && !IsSafeMinecraftUsername(displayName)) continue;
+        if ((available != 0 && nicked != 0) ||
+            !IsSafeMinecraftUsername(displayName)) continue;
 
         PublicWinsCacheEntry entry;
         entry.hasDefinitiveResult = true;
         entry.available = available != 0;
+        entry.nicked = nicked != 0;
         entry.wins = wins;
         entry.fetchedEpochMs = fetchedEpochMs;
         entry.apiDisplayName = displayName;
@@ -1389,12 +1358,13 @@ void SavePublicWinsCache() {
     std::string tempPath = cachePath + ".tmp";
     std::ofstream f(tempPath, std::ios::binary | std::ios::trunc);
     if (!f.is_open()) return;
-    f << "public_wins_cache_version 1\n";
+    f << "public_wins_cache_version 3\n";
     for (const auto& item : snapshot) {
         const PublicWinsCacheEntry& entry = item.second;
         if (!entry.hasDefinitiveResult || entry.fetchedEpochMs == 0) continue;
         f << item.first << " " << entry.fetchedEpochMs << " "
-            << (entry.available ? 1 : 0) << " " << entry.wins << " "
+            << (entry.available ? 1 : 0) << " " << (entry.nicked ? 1 : 0) << " "
+            << entry.wins << " "
             << (entry.apiDisplayName.empty() ? "-" : entry.apiDisplayName) << "\n";
     }
     f.close();
@@ -1454,12 +1424,14 @@ PublicWinsFetchResult FetchPublicWins(
     const std::string& serverUrl,
     const std::string& clientToken,
     unsigned long long& wins,
+    bool& nicked,
     std::string& apiDisplayName,
     unsigned long long& fetchedEpochMs,
     DWORD& retryDelayMs,
     DWORD& statusCode,
     DWORD& lastError) {
     wins = 0;
+    nicked = false;
     apiDisplayName.clear();
     fetchedEpochMs = 0;
     retryDelayMs = (DWORD)kHypixelWinsFailureRetryMs;
@@ -1518,7 +1490,10 @@ PublicWinsFetchResult FetchPublicWins(
             retryDelayMs = QueryPublicWinsRetryDelayMs(request);
         }
         else {
-            WinHttpReadAll(request, response);
+            if (!WinHttpReadAll(request, response)) {
+                lastError = GetLastError();
+                sent = false;
+            }
         }
     }
 
@@ -1545,7 +1520,18 @@ PublicWinsFetchResult FetchPublicWins(
     else {
         retryDelayMs = (DWORD)kHypixelWinsCacheTtlMs;
     }
-    if (!available) return PUBLIC_WINS_FETCH_UNAVAILABLE;
+    if (!available) {
+        bool confirmedNicked = false;
+        // Older backend versions cannot distinguish a nick from a missing
+        // profile. Treat that response as transient instead of caching a
+        // potentially wrong identity result.
+        if (!JsonBoolInRange(
+                response, 0, response.size(), "nicked", confirmedNicked)) {
+            return PUBLIC_WINS_FETCH_TRANSIENT;
+        }
+        nicked = confirmedNicked;
+        return PUBLIC_WINS_FETCH_UNAVAILABLE;
+    }
     if (!JsonUnsignedLongLongInRange(response, 0, response.size(), "wins", wins)) return PUBLIC_WINS_FETCH_TRANSIENT;
     apiDisplayName = lookup.playerName;
     return PUBLIC_WINS_FETCH_AVAILABLE;
@@ -1578,12 +1564,13 @@ DWORD WINAPI PublicWinsWorkerThread(LPVOID) {
             clientToken = g_publicWinsClientToken;
         }
         unsigned long long wins = 0;
+        bool nicked = false;
         std::string apiDisplayName;
         unsigned long long fetchedEpochMs = 0;
         DWORD retryDelayMs = (DWORD)kHypixelWinsFailureRetryMs;
         DWORD statusCode = 0;
         DWORD lastError = ERROR_SUCCESS;
-        PublicWinsFetchResult result = FetchPublicWins(lookup, serverUrl, clientToken, wins, apiDisplayName,
+        PublicWinsFetchResult result = FetchPublicWins(lookup, serverUrl, clientToken, wins, nicked, apiDisplayName,
             fetchedEpochMs, retryDelayMs, statusCode, lastError);
 
         ULONGLONG nowTickMs = GetTickCount64();
@@ -1595,8 +1582,9 @@ DWORD WINAPI PublicWinsWorkerThread(LPVOID) {
             if (result == PUBLIC_WINS_FETCH_AVAILABLE || result == PUBLIC_WINS_FETCH_UNAVAILABLE) {
                 entry.hasDefinitiveResult = true;
                 entry.available = result == PUBLIC_WINS_FETCH_AVAILABLE;
+                entry.nicked = result == PUBLIC_WINS_FETCH_UNAVAILABLE && nicked;
                 entry.wins = wins;
-                entry.apiDisplayName = apiDisplayName;
+                entry.apiDisplayName = lookup.playerName;
                 entry.fetchedEpochMs = fetchedEpochMs != 0 ? fetchedEpochMs : GetUnixEpochMilliseconds();
                 entry.nextFetchTickMs = nowTickMs + retryDelayMs;
                 persist = true;
@@ -1609,9 +1597,10 @@ DWORD WINAPI PublicWinsWorkerThread(LPVOID) {
         if (persist) SavePublicWinsCache();
         if ((result == PUBLIC_WINS_FETCH_AVAILABLE || result == PUBLIC_WINS_FETCH_UNAVAILABLE) &&
             InterlockedIncrement(&g_publicWinsFetchLogCount) <= 5) {
-            DebugLog("Public wins fetch result player=%s available=%d wins=%llu status=%lu",
+            DebugLog("Public wins fetch result player=%s available=%d nicked=%d wins=%llu status=%lu",
                 lookup.playerName.c_str(),
                 result == PUBLIC_WINS_FETCH_AVAILABLE ? 1 : 0,
+                nicked ? 1 : 0,
                 wins,
                 (unsigned long)statusCode);
         }
@@ -1626,6 +1615,8 @@ DWORD WINAPI PublicWinsWorkerThread(LPVOID) {
 }
 
 void StartPublicWinsWorker() {
+    std::lock_guard<std::mutex> lifecycleLock(g_publicWinsLifecycleMutex);
+    if (IsModuleUnloadRequested()) return;
     std::string serverUrl;
     std::string clientToken;
     std::string runtimeDir;
@@ -1642,7 +1633,7 @@ void StartPublicWinsWorker() {
     std::lock_guard<std::mutex> lock(g_publicWinsMutex);
     g_publicWinsServerUrl = serverUrl;
     g_publicWinsClientToken = clientToken;
-    if (g_publicWinsThreadHandle && WaitForSingleObject(g_publicWinsThreadHandle, 0) == WAIT_TIMEOUT) return;
+    if (g_publicWinsThreadHandle && WaitForSingleObject(g_publicWinsThreadHandle, 0) != WAIT_OBJECT_0) return;
     if (g_publicWinsThreadHandle) CloseHandle(g_publicWinsThreadHandle);
     if (g_publicWinsStopEvent) CloseHandle(g_publicWinsStopEvent);
     if (g_publicWinsQueueEvent) CloseHandle(g_publicWinsQueueEvent);
@@ -1668,7 +1659,8 @@ void StartPublicWinsWorker() {
     }
 }
 
-void StopPublicWinsWorker() {
+bool StopPublicWinsWorker(DWORD timeoutMs) {
+    std::lock_guard<std::mutex> lifecycleLock(g_publicWinsLifecycleMutex);
     HANDLE threadHandle = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_publicWinsMutex);
@@ -1676,9 +1668,12 @@ void StopPublicWinsWorker() {
         if (g_publicWinsStopEvent) SetEvent(g_publicWinsStopEvent);
         if (g_publicWinsQueueEvent) SetEvent(g_publicWinsQueueEvent);
     }
-    if (threadHandle && WaitForSingleObject(threadHandle, 5000) == WAIT_TIMEOUT) {
-        DebugLog("Public wins worker did not stop within timeout");
-        return;
+    if (threadHandle) {
+        DWORD waitResult = WaitForSingleObject(threadHandle, timeoutMs);
+        if (waitResult != WAIT_OBJECT_0) {
+            DebugLog("Public wins worker stop not confirmed waitResult=%lu", waitResult);
+            return false;
+        }
     }
 
     std::lock_guard<std::mutex> lock(g_publicWinsMutex);
@@ -1691,6 +1686,7 @@ void StopPublicWinsWorker() {
     g_publicWinsQueue.clear();
     g_publicWinsQueuedUuids.clear();
     for (auto& item : g_publicWinsCache) item.second.fetching = false;
+    return true;
 }
 
 void SetPublicWinsEnabled(bool enabled) {
@@ -1717,54 +1713,66 @@ void QueuePublicWinsLookup(const std::string& uuidValue, const std::string& play
     if (uuid.empty()) return;
     ULONGLONG nowTickMs = GetTickCount64();
     unsigned long long nowEpochMs = GetUnixEpochMilliseconds();
-    HANDLE queueEvent = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_publicWinsMutex);
         PublicWinsCacheEntry& entry = g_publicWinsCache[uuid];
         bool fresh = entry.hasDefinitiveResult && nowEpochMs >= entry.fetchedEpochMs &&
-            nowEpochMs - entry.fetchedEpochMs < kHypixelWinsCacheTtlMs;
+            nowEpochMs - entry.fetchedEpochMs < kHypixelWinsCacheTtlMs &&
+            _stricmp(entry.apiDisplayName.c_str(), playerName.c_str()) == 0;
         if (entry.fetching || fresh || nowTickMs < entry.nextFetchTickMs) return;
         entry.fetching = true;
         entry.nextFetchTickMs = nowTickMs + 30000ULL;
         if (g_publicWinsQueuedUuids.insert(uuid).second) g_publicWinsQueue.push_back({ uuid, playerName });
-        queueEvent = g_publicWinsQueueEvent;
+        if (g_publicWinsQueueEvent) SetEvent(g_publicWinsQueueEvent);
     }
-    if (queueEvent) SetEvent(queueEvent);
 }
 
-bool GetPublicWinsCached(const std::string& uuidValue, const std::string& playerName, unsigned long long& wins) {
+PublicWinsCachedResult GetPublicWinsCached(
+    const std::string& uuidValue,
+    const std::string& playerName,
+    unsigned long long& wins) {
     wins = 0;
     if (InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) == 0 ||
-        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0) return false;
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0) return PUBLIC_WINS_CACHED_NONE;
     std::string uuid = NormalizePublicWinsUuid(uuidValue);
-    if (uuid.empty()) return false;
+    if (uuid.empty()) return PUBLIC_WINS_CACHED_NONE;
 
     std::lock_guard<std::mutex> lock(g_publicWinsMutex);
     auto it = g_publicWinsCache.find(uuid);
-    if (it == g_publicWinsCache.end() || !it->second.hasDefinitiveResult || !it->second.available ||
-        _stricmp(it->second.apiDisplayName.c_str(), playerName.c_str()) != 0) return false;
-    wins = it->second.wins;
-    return true;
+    if (it == g_publicWinsCache.end() || !it->second.hasDefinitiveResult ||
+        _stricmp(it->second.apiDisplayName.c_str(), playerName.c_str()) != 0) {
+        return PUBLIC_WINS_CACHED_NONE;
+    }
+    if (it->second.available) {
+        wins = it->second.wins;
+        return PUBLIC_WINS_CACHED_AVAILABLE;
+    }
+    return it->second.nicked ? PUBLIC_WINS_CACHED_NICKED : PUBLIC_WINS_CACHED_NONE;
 }
 
-bool GetPublicWinsCachedByPlayerName(const std::string& playerName, unsigned long long& wins) {
+PublicWinsCachedResult GetPublicWinsCachedByPlayerName(
+    const std::string& playerName,
+    unsigned long long& wins) {
     wins = 0;
     if (playerName.empty() ||
         InterlockedCompareExchange(&g_publicWinsRuntimeEnabled, 0, 0) == 0 ||
-        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0) return false;
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) == 0) return PUBLIC_WINS_CACHED_NONE;
 
     std::lock_guard<std::mutex> lock(g_publicWinsMutex);
     const PublicWinsCacheEntry* newest = nullptr;
     for (const auto& item : g_publicWinsCache) {
         const PublicWinsCacheEntry& entry = item.second;
-        if (!entry.hasDefinitiveResult || !entry.available ||
+        if (!entry.hasDefinitiveResult || (!entry.available && !entry.nicked) ||
             _stricmp(entry.apiDisplayName.c_str(), playerName.c_str()) != 0 ||
             (newest && newest->fetchedEpochMs >= entry.fetchedEpochMs)) continue;
         newest = &entry;
     }
-    if (!newest) return false;
-    wins = newest->wins;
-    return true;
+    if (!newest) return PUBLIC_WINS_CACHED_NONE;
+    if (newest->available) {
+        wins = newest->wins;
+        return PUBLIC_WINS_CACHED_AVAILABLE;
+    }
+    return newest->nicked ? PUBLIC_WINS_CACHED_NICKED : PUBLIC_WINS_CACHED_NONE;
 }
 
 bool ResolveNodeExecutable(std::string& nodePath) {
@@ -1812,6 +1820,13 @@ SOCKET ConnectMutedVoiceControl(DWORD timeoutMs, HANDLE stopEvent) {
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
         if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            // A stalled helper must not leave unload blocked forever in send().
+            DWORD sendTimeoutMs = 2000;
+            if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+                    reinterpret_cast<const char*>(&sendTimeoutMs), sizeof(sendTimeoutMs)) == SOCKET_ERROR) {
+                closesocket(sock);
+                return INVALID_SOCKET;
+            }
             return sock;
         }
 
@@ -1874,6 +1889,7 @@ std::string MakeMutedVoiceDefaultConfigJson(const std::string& partyOwner) {
     json += "  \"auth\": \"microsoft\",\n";
     json += "  \"flow\": \"live\",\n";
     json += "  \"host\": \"mc.hypixel.net\",\n";
+    json += "  \"fallbackHost\": \"chi.free.overlag.link\",\n";
     json += "  \"partyOwnerUsername\": \"";
     json += JsonEscape(partyOwner);
     json += "\",\n";
@@ -2487,13 +2503,16 @@ cleanup:
 }
 
 void StartMutedVoiceWorker() {
+    std::lock_guard<std::mutex> lifecycleLock(g_mutedVoiceLifecycleMutex);
+    if (IsModuleUnloadRequested()) return;
     std::string startError;
 
     std::lock_guard<std::mutex> lock(g_mutedVoiceMutex);
+    if (g_mutedVoiceSignOutInProgress) return;
 
     if (g_mutedVoiceThreadHandle) {
         DWORD waitResult = WaitForSingleObject(g_mutedVoiceThreadHandle, 0);
-        if (waitResult == WAIT_TIMEOUT) return;
+        if (waitResult != WAIT_OBJECT_0) return;
 
         CloseHandle(g_mutedVoiceThreadHandle);
         g_mutedVoiceThreadHandle = nullptr;
@@ -2521,8 +2540,8 @@ void StartMutedVoiceWorker() {
         DWORD threadId = 0;
         g_mutedVoiceThreadHandle = CreateThread(nullptr, 0, MutedVoiceWorkerThread, nullptr, 0, &threadId);
         if (!g_mutedVoiceThreadHandle) {
-            CloseHandle(g_mutedVoiceStopEvent);
-            CloseHandle(g_mutedVoiceQueueEvent);
+            if (g_mutedVoiceStopEvent) CloseHandle(g_mutedVoiceStopEvent);
+            if (g_mutedVoiceQueueEvent) CloseHandle(g_mutedVoiceQueueEvent);
             g_mutedVoiceStopEvent = nullptr;
             g_mutedVoiceQueueEvent = nullptr;
             startError = "failed to create worker thread";
@@ -2537,7 +2556,8 @@ void StartMutedVoiceWorker() {
     }
 }
 
-void StopMutedVoiceWorker() {
+bool StopMutedVoiceWorker(DWORD timeoutMs = 7000) {
+    std::lock_guard<std::mutex> lifecycleLock(g_mutedVoiceLifecycleMutex);
     HANDLE threadHandle = nullptr;
     HANDLE stopEvent = nullptr;
 
@@ -2549,11 +2569,11 @@ void StopMutedVoiceWorker() {
     }
 
     if (threadHandle) {
-        DWORD waitResult = WaitForSingleObject(threadHandle, 7000);
-        if (waitResult == WAIT_TIMEOUT) {
-            DebugLog("Muted Voice worker did not stop within timeout");
+        DWORD waitResult = WaitForSingleObject(threadHandle, timeoutMs);
+        if (waitResult != WAIT_OBJECT_0) {
+            DebugLog("Muted Voice worker stop not confirmed waitResult=%lu", waitResult);
             SetMutedVoiceStatus(MUTED_VOICE_STATUS_ERROR, "worker stop timed out");
-            return;
+            return false;
         }
     }
 
@@ -2576,6 +2596,7 @@ void StopMutedVoiceWorker() {
     }
 
     SetMutedVoiceStatus(MUTED_VOICE_STATUS_OFFLINE);
+    return true;
 }
 
 void SetMutedVoiceModuleEnabled(bool enabled) {
@@ -2590,24 +2611,21 @@ void SetMutedVoiceModuleEnabled(bool enabled) {
 bool QueueMutedVoiceControlCommand(const std::string& command) {
     if (command.empty()) return false;
 
-    HANDLE queueEvent = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_mutedVoiceMutex);
         if (g_mutedVoiceControlQueue.size() >= 64) {
             g_mutedVoiceControlQueue.pop_front();
         }
         g_mutedVoiceControlQueue.push_back(command);
-        queueEvent = g_mutedVoiceQueueEvent;
+        if (g_mutedVoiceQueueEvent) SetEvent(g_mutedVoiceQueueEvent);
     }
 
-    if (queueEvent) SetEvent(queueEvent);
     return true;
 }
 
 bool QueueMutedVoiceChatMessage(const std::string& message) {
     if (!g_guiExtrasMutedVoice || message.empty()) return false;
 
-    HANDLE queueEvent = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_mutedVoiceMutex);
         if (g_mutedVoiceChatQueue.size() >= 64) {
@@ -2615,19 +2633,18 @@ bool QueueMutedVoiceChatMessage(const std::string& message) {
             return false;
         }
         g_mutedVoiceChatQueue.push_back(message);
-        queueEvent = g_mutedVoiceQueueEvent;
+        if (g_mutedVoiceQueueEvent) SetEvent(g_mutedVoiceQueueEvent);
     }
 
-    if (queueEvent) SetEvent(queueEvent);
     DebugLog("Muted Voice queued chat message length=%u", (unsigned int)message.size());
     return true;
 }
 
 DWORD WINAPI MutedVoiceSignOutThread(LPVOID) {
-    StopMutedVoiceWorker();
+    bool workerStopped = StopMutedVoiceWorker(INFINITE);
 
     std::string authDir;
-    bool ok = ResolveMutedVoiceAuthCacheDir(authDir) && DeleteMutedVoiceAuthCache(authDir);
+    bool ok = workerStopped && ResolveMutedVoiceAuthCacheDir(authDir) && DeleteMutedVoiceAuthCache(authDir);
 
     {
         std::lock_guard<std::mutex> lock(g_mutedVoiceMutex);
@@ -2646,6 +2663,13 @@ DWORD WINAPI MutedVoiceSignOutThread(LPVOID) {
 }
 
 void BeginMutedVoiceSignOut() {
+    std::lock_guard<std::mutex> lifecycleLock(g_mutedVoiceSignOutLifecycleMutex);
+    if (IsModuleUnloadRequested()) return;
+    if (g_mutedVoiceSignOutThreadHandle) {
+        if (WaitForSingleObject(g_mutedVoiceSignOutThreadHandle, 0) != WAIT_OBJECT_0) return;
+        CloseHandle(g_mutedVoiceSignOutThreadHandle);
+        g_mutedVoiceSignOutThreadHandle = nullptr;
+    }
     bool shouldStart = false;
     {
         std::lock_guard<std::mutex> lock(g_mutedVoiceMutex);
@@ -2673,8 +2697,20 @@ void BeginMutedVoiceSignOut() {
         return;
     }
 
-    CloseHandle(threadHandle);
+    g_mutedVoiceSignOutThreadHandle = threadHandle;
     RequestGuiRepaint();
+}
+
+bool JoinMutedVoiceSignOutThread() {
+    std::lock_guard<std::mutex> lifecycleLock(g_mutedVoiceSignOutLifecycleMutex);
+    if (!g_mutedVoiceSignOutThreadHandle) return true;
+    if (WaitForSingleObject(g_mutedVoiceSignOutThreadHandle, INFINITE) != WAIT_OBJECT_0) {
+        DebugLog("Muted Voice sign-out thread stop could not be confirmed");
+        return false;
+    }
+    CloseHandle(g_mutedVoiceSignOutThreadHandle);
+    g_mutedVoiceSignOutThreadHandle = nullptr;
+    return true;
 }
 
 void OpenMutedVoiceAuthUrl() {
@@ -2835,35 +2871,12 @@ LONG WINAPI FullscreenCrashUnhandledExceptionFilter(EXCEPTION_POINTERS* exceptio
         wglGetCurrentContext(),
         wglGetCurrentDC());
 
-    if (g_prevUnhandledExceptionFilter) return g_prevUnhandledExceptionFilter(exceptionInfo);
+    if (g_prevUnhandledExceptionFilter && exceptionInfo) return g_prevUnhandledExceptionFilter(exceptionInfo);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
 int NormalizeKeybind(int value) {
     return (value >= 0 && value <= 255) ? value : 0;
-}
-
-int NormalizeSeeBarriersRange(int value) {
-    if (value >= kSeeBarriersRangeInfinite) return kSeeBarriersRangeInfinite;
-    if (value < kSeeBarriersRangeMin) return kSeeBarriersRangeMin;
-    if (value > kSeeBarriersRangeMax) return kSeeBarriersRangeMax;
-    return value;
-}
-
-bool IsSeeBarriersRangeInfinite(int value) {
-    return NormalizeSeeBarriersRange(value) == kSeeBarriersRangeInfinite;
-}
-
-std::string FormatSeeBarriersRangeLabel(int value) {
-    if (IsSeeBarriersRangeInfinite(value)) return "Infinite";
-
-    char buf[32];
-    sprintf(buf, "%d blocks", NormalizeSeeBarriersRange(value));
-    return buf;
-}
-
-int NormalizeSeeBarriersStyle(int value) {
-    return value == SEE_BARRIERS_STYLE_OUTLINE ? SEE_BARRIERS_STYLE_OUTLINE : SEE_BARRIERS_STYLE_BOX_OUTLINE;
 }
 
 bool IsKeybindDown(int keybind) {
@@ -2880,6 +2893,8 @@ void SaveToolSettings() {
     f << "timer_locked " << (g_guiTimerLocked ? 1 : 0) << "\n";
     f << "timer_nametag_enabled " << (g_guiTimerNametagEnabled ? 1 : 0) << "\n";
     f << "timer_nametag_position " << NormalizeTimerNametagPosition(g_guiTimerNametagPosition) << "\n";
+    f << "timer_nametag_prefix_tnt_placement "
+        << NormalizePrefixTntTagPlacement(g_guiTimerPrefixTntTagPlacement) << "\n";
     f << "timer_edit_default_scoreboard " << (g_guiTimerEditDefaultScoreboard ? 1 : 0) << "\n";
     f << "timer_obs_screenshots " << (g_guiTimerObsScreenshotsEnabled ? 1 : 0) << "\n";
     f << "timer_crosshair_mode " << (g_guiTimerCrosshairMode ? 1 : 0) << "\n";
@@ -2900,6 +2915,8 @@ void SaveToolSettings() {
     f << "slowness_volume " << g_slownessVolume << "\n";
     f << "public_helpers_wins_enabled " << (g_guiPublicWinsEnabled ? 1 : 0) << "\n";
     f << "public_helpers_wins_position " << g_guiPublicWinsPosition << "\n";
+    f << "public_helpers_wins_prefix_tnt_placement "
+        << NormalizePrefixTntTagPlacement(g_guiPublicWinsPrefixTntTagPlacement) << "\n";
     f << "public_helpers_wins_space_between_username " << (g_guiPublicWinsSpaceBetweenUsername ? 1 : 0) << "\n";
     f << "extras_force_wheat_stage1 " << (g_guiExtrasForceWheatStage1 ? 1 : 0) << "\n";
     f << "extras_hide_beacon_beams " << (g_guiExtrasHideBeaconBeams ? 1 : 0) << "\n";
@@ -2942,6 +2959,12 @@ void LoadToolSettings() {
         else if (key == "timer_nametag_position") {
             int value = TIMER_NAMETAG_POSITION_SUFFIX;
             if (f >> value) g_guiTimerNametagPosition = NormalizeTimerNametagPosition(value);
+        }
+        else if (key == "timer_nametag_prefix_tnt_placement") {
+            int value = PREFIX_TNT_TAG_PLACEMENT_BEFORE;
+            if (f >> value) {
+                g_guiTimerPrefixTntTagPlacement = NormalizePrefixTntTagPlacement(value);
+            }
         }
         else if (key == "timer_edit_default_scoreboard") {
             int value = 0;
@@ -3009,6 +3032,12 @@ void LoadToolSettings() {
             if (f >> value) g_guiPublicWinsPosition = value == PUBLIC_WINS_POSITION_SUFFIX
                 ? PUBLIC_WINS_POSITION_SUFFIX : PUBLIC_WINS_POSITION_PREFIX;
         }
+        else if (key == "public_helpers_wins_prefix_tnt_placement") {
+            int value = PREFIX_TNT_TAG_PLACEMENT_AFTER;
+            if (f >> value) {
+                g_guiPublicWinsPrefixTntTagPlacement = NormalizePrefixTntTagPlacement(value);
+            }
+        }
         else if (key == "public_helpers_wins_space_between_username") {
             int value = 0;
             if (f >> value) g_guiPublicWinsSpaceBetweenUsername = value != 0;
@@ -3071,13 +3100,174 @@ void LoadToolSettings() {
 // =============================================================
 // Decimal timer
 // =============================================================
-double GetDecimalSeconds() {
+double GetRawDecimalSeconds() {
     if (!g_timerActive || g_timerStartSeconds < 0.0) return -1.0;
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     double elapsed = (double)(now.QuadPart - g_explosionSetAt.QuadPart) / (double)g_perfFreq.QuadPart;
     double result = g_timerStartSeconds - elapsed;
     return result < 0.0 ? 0.0 : result;
+}
+
+double GetDecimalSeconds() {
+    double result = GetRawDecimalSeconds();
+    if (result < 0.0) return result;
+    if (!g_betweenRoundsTimerActive &&
+        InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) != 0) {
+        result -= g_roundEndLeadSeconds;
+    }
+    return result < 0.0 ? 0.0 : result;
+}
+
+double AddRoundTimingSample(
+    std::vector<double>& samples,
+    double sample,
+    double minimum,
+    double maximum) {
+    if (!std::isfinite(sample) || sample < minimum || sample > maximum) {
+        if (samples.empty()) return 0.0;
+    }
+    else {
+        samples.push_back(sample);
+        if (samples.size() > kRoundTimingSampleLimit) samples.erase(samples.begin());
+    }
+
+    if (samples.empty()) return 0.0;
+    std::vector<double> sorted = samples;
+    std::sort(sorted.begin(), sorted.end());
+    const size_t middle = sorted.size() / 2;
+    if ((sorted.size() & 1U) != 0) return sorted[middle];
+    return (sorted[middle - 1] + sorted[middle]) * 0.5;
+}
+
+void ResetCurrentRoundTimingObservation() {
+    g_roundTimingActiveStartedMs = 0;
+    g_roundTimingLastSecondMs = 0;
+    g_roundTimingLastSecond = -1;
+    g_roundTimingDescendingTicks = 0;
+    g_roundTimingScoreboardRound = -1;
+    g_roundTimingMap.clear();
+}
+
+void RecordRoundTimingStartOrTick(
+    ULONGLONG nowMs,
+    int seconds,
+    int scoreboardRound,
+    const std::string& mapName,
+    bool beganAfterIntermission) {
+    if (!mapName.empty()) g_roundTimingMap = mapName;
+
+    if (beganAfterIntermission && g_betweenRoundsStartedAtMs != 0 &&
+        nowMs >= g_betweenRoundsStartedAtMs) {
+        const double observedSeconds =
+            (double)(nowMs - g_betweenRoundsStartedAtMs) / 1000.0;
+        const double learned = AddRoundTimingSample(
+            g_betweenRoundDurationSamples,
+            observedSeconds,
+            kBetweenRoundMinimumSeconds,
+            kBetweenRoundMaximumSeconds);
+        if (learned > 0.0) g_betweenRoundDurationSeconds = learned;
+        DebugLog(
+            "RoundTiming intermission end previousSequence=%d observedMs=%llu learnedMs=%d samples=%u",
+            g_roundTimingSequence,
+            (unsigned long long)(nowMs - g_betweenRoundsStartedAtMs),
+            (int)std::lround(g_betweenRoundDurationSeconds * 1000.0),
+            (unsigned int)g_betweenRoundDurationSamples.size());
+    }
+
+    const bool scoreboardRoundChanged = scoreboardRound > 0 &&
+        g_roundTimingScoreboardRound > 0 &&
+        scoreboardRound != g_roundTimingScoreboardRound;
+    const bool timerJumpedUp = g_roundTimingLastSecond >= 0 &&
+        seconds > g_roundTimingLastSecond + 2;
+    const bool newRound = g_roundTimingActiveStartedMs == 0 ||
+        beganAfterIntermission || scoreboardRoundChanged || timerJumpedUp;
+
+    if (newRound) {
+        ++g_roundTimingSequence;
+        g_roundTimingActiveStartedMs = nowMs;
+        g_roundTimingLastSecondMs = nowMs;
+        g_roundTimingLastSecond = seconds;
+        g_roundTimingDescendingTicks = 0;
+        // Hypixel changes the countdown before it changes the sidebar's round
+        // number. Do not carry the previous round into the new observation or
+        // the delayed sidebar update will look like a second round start.
+        if (beganAfterIntermission) g_roundTimingScoreboardRound = -1;
+        else if (scoreboardRound > 0) g_roundTimingScoreboardRound = scoreboardRound;
+        DebugLog(
+            "RoundTiming start sequence=%d scoreboardRound=%d map=%s seconds=%d learnedLeadMs=%d learnedIntermissionMs=%d source=%s",
+            g_roundTimingSequence,
+            g_roundTimingScoreboardRound,
+            g_roundTimingMap.empty() ? "unknown" : g_roundTimingMap.c_str(),
+            seconds,
+            (int)std::lround(g_roundEndLeadSeconds * 1000.0),
+            (int)std::lround(g_betweenRoundDurationSeconds * 1000.0),
+            beganAfterIntermission ? "intermission" :
+                (timerJumpedUp ? "timer-jump" :
+                    (scoreboardRoundChanged ? "scoreboard-round" : "first-observation")));
+        return;
+    }
+
+    if (scoreboardRound > 0) g_roundTimingScoreboardRound = scoreboardRound;
+    if (seconds == g_roundTimingLastSecond) return;
+
+    const ULONGLONG intervalMs = g_roundTimingLastSecondMs != 0 &&
+        nowMs >= g_roundTimingLastSecondMs
+        ? nowMs - g_roundTimingLastSecondMs
+        : 0;
+    const int delta = seconds - g_roundTimingLastSecond;
+    if (delta < 0 && delta >= -2) ++g_roundTimingDescendingTicks;
+    DebugLog(
+        "RoundTiming tick sequence=%d scoreboardRound=%d seconds=%d previous=%d delta=%d intervalMs=%llu rawRemainingMs=%d",
+        g_roundTimingSequence,
+        g_roundTimingScoreboardRound,
+        seconds,
+        g_roundTimingLastSecond,
+        delta,
+        (unsigned long long)intervalMs,
+        (int)std::lround(GetRawDecimalSeconds() * 1000.0));
+    g_roundTimingLastSecond = seconds;
+    g_roundTimingLastSecondMs = nowMs;
+}
+
+void RecordRoundTimingEnd(
+    ULONGLONG nowMs,
+    double rawRemainingSeconds,
+    const char* trigger) {
+    const bool accepted = g_roundTimingActiveStartedMs != 0 &&
+        g_roundTimingDescendingTicks >= 2 &&
+        std::isfinite(rawRemainingSeconds) &&
+        rawRemainingSeconds >= 0.0 &&
+        rawRemainingSeconds <= kRoundEndLeadMaximumSeconds;
+    if (accepted) {
+        g_roundEndLeadSeconds = AddRoundTimingSample(
+            g_roundEndLeadSamples,
+            rawRemainingSeconds,
+            0.0,
+            kRoundEndLeadMaximumSeconds);
+    }
+
+    const ULONGLONG activeMs = g_roundTimingActiveStartedMs != 0 &&
+        nowMs >= g_roundTimingActiveStartedMs
+        ? nowMs - g_roundTimingActiveStartedMs
+        : 0;
+    DebugLog(
+        "RoundTiming end sequence=%d scoreboardRound=%d map=%s trigger=%s rawResidualMs=%d activeMs=%llu descendingTicks=%d accepted=%d learnedLeadMs=%d samples=%u",
+        g_roundTimingSequence,
+        g_roundTimingScoreboardRound,
+        g_roundTimingMap.empty() ? "unknown" : g_roundTimingMap.c_str(),
+        trigger ? trigger : "unknown",
+        (int)std::lround((std::max)(0.0, rawRemainingSeconds) * 1000.0),
+        (unsigned long long)activeMs,
+        g_roundTimingDescendingTicks,
+        accepted ? 1 : 0,
+        (int)std::lround(g_roundEndLeadSeconds * 1000.0),
+        (unsigned int)g_roundEndLeadSamples.size());
+
+    g_roundTimingActiveStartedMs = 0;
+    g_roundTimingLastSecondMs = 0;
+    g_roundTimingLastSecond = -1;
+    g_roundTimingDescendingTicks = 0;
 }
 
 void GetTimerColor(int whole, float& r, float& g, float& b) {
@@ -3136,72 +3326,10 @@ JavaVM* g_jvm = nullptr;
 JNIEnv* g_env = nullptr;
 jvmtiEnv* g_jvmti = nullptr;
 bool g_jvmtiFailed = false;
-bool g_seeBarriersMinecraftApplied = false;
-bool g_seeBarriersMinecraftFailed = false;
-volatile LONG g_seeBarriersMinecraftRefreshPending = 0;
 bool g_sharedClassFileHookInstalled = false;
 volatile LONG g_runtimeClassCaptureEnabled = 0;
 jclass g_runtimeClassCaptureTarget = nullptr;
 std::vector<unsigned char> g_runtimeCapturedClassBytes;
-jclass g_seeBarriersBarrierClass = nullptr;
-std::vector<unsigned char> g_seeBarriersOriginalClassBytes;
-std::vector<unsigned char> g_seeBarriersPatchedClassBytes;
-std::vector<unsigned char> g_seeBarriersOriginalDamageDispatcherBytes;
-std::vector<unsigned char> g_seeBarriersPatchedDamageDispatcherBytes;
-bool g_seeBarriersDamageDispatcherPatched = false;
-std::vector<unsigned char> g_seeBarriersOriginalRenderChunkBytes;
-std::vector<unsigned char> g_seeBarriersPatchedRenderChunkBytes;
-bool g_seeBarriersRenderChunkPatched = false;
-jclass g_seeBarriersBlockClass = nullptr;
-jclass g_seeBarriersBlockRendererDispatcherClass = nullptr;
-jclass g_seeBarriersRenderChunkClass = nullptr;
-jclass g_seeBarriersBlockStateContainerClass = nullptr;
-jclass g_seeBarriersBlockModelShapesClass = nullptr;
-jclass g_seeBarriersMapClass = nullptr;
-jclass g_seeBarriersBakedModelClass = nullptr;
-jclass g_seeBarriersListClass = nullptr;
-jclass g_seeBarriersDirectionClass = nullptr;
-jclass g_seeBarriersObjectClass = nullptr;
-jclass g_seeBarriersEnumClass = nullptr;
-jmethodID g_seeBarriersMinecraftGetBlockRendererDispatcher = nullptr;
-jmethodID g_seeBarriersBlockRendererGetModelShapes = nullptr;
-jmethodID g_seeBarriersBlockModelShapesGetModel = nullptr;
-jmethodID g_seeBarriersBlockGetById = nullptr;
-jmethodID g_seeBarriersBlockGetStateContainer = nullptr;
-jmethodID g_seeBarriersBlockGetDefaultState = nullptr;
-jmethodID g_seeBarriersBlockStateContainerGetValidStates = nullptr;
-jmethodID g_seeBarriersBlockGetRenderType = nullptr;
-jmethodID g_seeBarriersBlockGetRenderLayer = nullptr;
-jmethodID g_seeBarriersBlockGetActualState = nullptr;
-jmethodID g_seeBarriersBlockShouldSideBeRendered = nullptr;
-jmethodID g_seeBarriersBlockRendererGetModelForWorldState = nullptr;
-jmethodID g_seeBarriersBakedModelGetGeneralQuads = nullptr;
-jmethodID g_seeBarriersBakedModelGetFaceQuads = nullptr;
-jmethodID g_seeBarriersListSize = nullptr;
-jmethodID g_seeBarriersListGet = nullptr;
-jmethodID g_seeBarriersDirectionValues = nullptr;
-jmethodID g_seeBarriersObjectToString = nullptr;
-jmethodID g_seeBarriersEnumOrdinal = nullptr;
-jmethodID g_seeBarriersMapGet = nullptr;
-jmethodID g_seeBarriersMapPut = nullptr;
-jmethodID g_seeBarriersMapRemove = nullptr;
-jfieldID g_seeBarriersBlockModelShapesModelMap = nullptr;
-bool g_seeBarriersModelOverrideInited = false;
-bool g_seeBarriersBarrierModelOverridden = false;
-jobject g_seeBarriersOriginalBarrierModel = nullptr;
-
-struct SeeBarriersStoredModelOverride {
-    jobject state = nullptr;
-    jobject originalModel = nullptr;
-    bool hadOriginalModel = false;
-};
-
-std::vector<SeeBarriersStoredModelOverride> g_seeBarriersStoredModelOverrides;
-
-bool EnsureSeeBarriersModelOverrideJNI(JNIEnv* env);
-bool InitSeeBarriersJNI();
-void ClearSeeBarriersDamageMarkers(JNIEnv* env);
-void ResetSeeBarriersCache(JNIEnv* env);
 
 struct ScoreboardJNIContext {
     jclass mcClass = nullptr;
@@ -4232,55 +4360,6 @@ bool IsMutedVoiceBotReroutedChatMessage(const std::string& message) {
     return reroutedCommand && HasChatCommandArgument(text, commandEnd);
 }
 
-bool ParseMutedVoicePrivateMessageCommand(
-    const std::string& message,
-    std::string& player,
-    std::string& privateMessage) {
-    player.clear();
-    privateMessage.clear();
-
-    std::string text = TrimChatCommandWhitespace(message);
-    if (text.empty() || text[0] != '/') return false;
-
-    size_t commandStart = 1;
-    size_t commandEnd = commandStart;
-    while (commandEnd < text.size()) {
-        char c = text[commandEnd];
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') break;
-        ++commandEnd;
-    }
-    if (commandEnd == commandStart) return false;
-
-    std::string command = ToLowerAscii(text.substr(commandStart, commandEnd - commandStart));
-    if (command != "msg") return false;
-
-    size_t playerStart = commandEnd;
-    while (playerStart < text.size() && (text[playerStart] == ' ' || text[playerStart] == '\t' ||
-        text[playerStart] == '\r' || text[playerStart] == '\n')) {
-        ++playerStart;
-    }
-    if (playerStart >= text.size()) return false;
-
-    size_t playerEnd = playerStart;
-    while (playerEnd < text.size()) {
-        char c = text[playerEnd];
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') break;
-        ++playerEnd;
-    }
-    if (playerEnd == playerStart) return false;
-
-    size_t messageStart = playerEnd;
-    while (messageStart < text.size() && (text[messageStart] == ' ' || text[messageStart] == '\t' ||
-        text[messageStart] == '\r' || text[messageStart] == '\n')) {
-        ++messageStart;
-    }
-    if (messageStart >= text.size()) return false;
-
-    player = text.substr(playerStart, playerEnd - playerStart);
-    privateMessage = TrimChatCommandWhitespace(text.substr(messageStart));
-    return !player.empty() && !privateMessage.empty();
-}
-
 bool CloseMutedVoiceChatScreen(JNIEnv* env) {
     if (!env || !InitMutedVoiceChatJNI(env)) return false;
 
@@ -4332,14 +4411,6 @@ bool IsSameJavaObject(JNIEnv* env, jobject left, jobject right) {
     return env && left && right && env->IsSameObject(left, right) == JNI_TRUE;
 }
 
-bool ContainsJavaObject(JNIEnv* env, const std::vector<jobject>& objects, jobject candidate) {
-    if (!env || !candidate) return false;
-    for (jobject object : objects) {
-        if (object && env->IsSameObject(object, candidate) == JNI_TRUE) return true;
-    }
-    return false;
-}
-
 void ClearHiddenSidebarSlotState(JNIEnv* env, jsize slot) {
     if (!env || slot < 0 || slot >= kScoreboardDisplaySlotCount) return;
     if (g_scoreboardJNI.hiddenSidebarObjectives[slot]) {
@@ -4363,70 +4434,6 @@ void ClearHiddenSidebarObjectiveState(JNIEnv* env) {
     }
 }
 
-bool CaptureHiddenSidebarScoresForObjective(jobject scoreboard, jobject objective, std::vector<jobject>& storedScores) {
-    if (!g_env || !scoreboard || !objective) return false;
-
-    jobject scoresByEntity = g_env->GetObjectField(scoreboard, g_scoreboardJNI.fScoresByEntity);
-    if (!scoresByEntity || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (scoresByEntity) g_env->DeleteLocalRef(scoresByEntity);
-        return false;
-    }
-
-    jobject scoreMaps = g_env->CallObjectMethod(scoresByEntity, g_scoreboardJNI.mMapValues);
-    if (!scoreMaps || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (scoreMaps) g_env->DeleteLocalRef(scoreMaps);
-        g_env->DeleteLocalRef(scoresByEntity);
-        return false;
-    }
-
-    jobjectArray entityScoreMaps = (jobjectArray)g_env->CallObjectMethod(scoreMaps, g_scoreboardJNI.mToArray);
-    if (!entityScoreMaps || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (entityScoreMaps) g_env->DeleteLocalRef(entityScoreMaps);
-        g_env->DeleteLocalRef(scoreMaps);
-        g_env->DeleteLocalRef(scoresByEntity);
-        return false;
-    }
-
-    jsize scoreMapCount = g_env->GetArrayLength(entityScoreMaps);
-    for (jsize i = 0; i < scoreMapCount; ++i) {
-        jobject entityScoreMap = g_env->GetObjectArrayElement(entityScoreMaps, i);
-        if (!entityScoreMap || g_env->ExceptionCheck()) {
-            g_env->ExceptionClear();
-            if (entityScoreMap) g_env->DeleteLocalRef(entityScoreMap);
-            continue;
-        }
-
-        jobject score = g_env->CallObjectMethod(entityScoreMap, g_scoreboardJNI.mMapGet, objective);
-        if (g_env->ExceptionCheck()) {
-            g_env->ExceptionClear();
-            if (score) g_env->DeleteLocalRef(score);
-            g_env->DeleteLocalRef(entityScoreMap);
-            continue;
-        }
-
-        if (score) {
-            jobject hiddenScore = g_env->NewGlobalRef(score);
-            if (hiddenScore && !g_env->ExceptionCheck()) {
-                storedScores.push_back(hiddenScore);
-            } else {
-                g_env->ExceptionClear();
-                if (hiddenScore) g_env->DeleteGlobalRef(hiddenScore);
-            }
-            g_env->DeleteLocalRef(score);
-        }
-
-        g_env->DeleteLocalRef(entityScoreMap);
-    }
-
-    g_env->DeleteLocalRef(entityScoreMaps);
-    g_env->DeleteLocalRef(scoreMaps);
-    g_env->DeleteLocalRef(scoresByEntity);
-    return true;
-}
-
 bool StoreHiddenSidebarObjectiveForSlot(jobject scoreboard, jsize slot, jobject objective) {
     if (!g_env || !scoreboard || !objective || slot < 0 || slot >= kScoreboardDisplaySlotCount) return false;
 
@@ -4446,167 +4453,6 @@ bool StoreHiddenSidebarObjectiveForSlot(jobject scoreboard, jsize slot, jobject 
         return false;
     }
 
-    return true;
-}
-
-bool RegisterStoredScoreboardObjective(jobject scoreboard, jobject objective) {
-    if (!g_env || !scoreboard || !objective) return false;
-
-    jobject objectivesByName = g_env->GetObjectField(scoreboard, g_scoreboardJNI.fObjectivesByName);
-    jobject objectivesByCriteria = g_env->GetObjectField(scoreboard, g_scoreboardJNI.fObjectivesByCriteria);
-    if (!objectivesByName || !objectivesByCriteria || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (objectivesByCriteria) g_env->DeleteLocalRef(objectivesByCriteria);
-        if (objectivesByName) g_env->DeleteLocalRef(objectivesByName);
-        return false;
-    }
-
-    jstring objectiveName = (jstring)g_env->GetObjectField(objective, g_scoreboardJNI.fObjectiveName);
-    jobject objectiveCriteria = g_env->GetObjectField(objective, g_scoreboardJNI.fObjectiveCriteria);
-    if (!objectiveName || !objectiveCriteria || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (objectiveCriteria) g_env->DeleteLocalRef(objectiveCriteria);
-        if (objectiveName) g_env->DeleteLocalRef(objectiveName);
-        g_env->DeleteLocalRef(objectivesByCriteria);
-        g_env->DeleteLocalRef(objectivesByName);
-        return false;
-    }
-
-    jobject existingObjective = g_env->CallObjectMethod(objectivesByName, g_scoreboardJNI.mMapGet, objectiveName);
-    if (g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (existingObjective) g_env->DeleteLocalRef(existingObjective);
-        g_env->DeleteLocalRef(objectiveCriteria);
-        g_env->DeleteLocalRef(objectiveName);
-        g_env->DeleteLocalRef(objectivesByCriteria);
-        g_env->DeleteLocalRef(objectivesByName);
-        return false;
-    }
-
-    if (existingObjective && !IsSameJavaObject(g_env, existingObjective, objective)) {
-        g_env->CallVoidMethod(scoreboard, g_scoreboardJNI.mScoreboardRemoveObjective, existingObjective);
-        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
-    }
-    if (existingObjective) g_env->DeleteLocalRef(existingObjective);
-
-    jobject previousByName = g_env->CallObjectMethod(objectivesByName, g_scoreboardJNI.mMapPut, objectiveName, objective);
-    if (g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (previousByName) g_env->DeleteLocalRef(previousByName);
-        g_env->DeleteLocalRef(objectiveCriteria);
-        g_env->DeleteLocalRef(objectiveName);
-        g_env->DeleteLocalRef(objectivesByCriteria);
-        g_env->DeleteLocalRef(objectivesByName);
-        return false;
-    }
-    if (previousByName) g_env->DeleteLocalRef(previousByName);
-
-    jobject criteriaObjectives = g_env->CallObjectMethod(objectivesByCriteria, g_scoreboardJNI.mMapGet, objectiveCriteria);
-    if (g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (criteriaObjectives) g_env->DeleteLocalRef(criteriaObjectives);
-        g_env->DeleteLocalRef(objectiveCriteria);
-        g_env->DeleteLocalRef(objectiveName);
-        g_env->DeleteLocalRef(objectivesByCriteria);
-        g_env->DeleteLocalRef(objectivesByName);
-        return false;
-    }
-
-    if (!criteriaObjectives) {
-        criteriaObjectives = g_env->NewObject(g_scoreboardJNI.arrayListClass, g_scoreboardJNI.mArrayListCtor);
-        if (!criteriaObjectives || g_env->ExceptionCheck()) {
-            g_env->ExceptionClear();
-            if (criteriaObjectives) g_env->DeleteLocalRef(criteriaObjectives);
-            g_env->DeleteLocalRef(objectiveCriteria);
-            g_env->DeleteLocalRef(objectiveName);
-            g_env->DeleteLocalRef(objectivesByCriteria);
-            g_env->DeleteLocalRef(objectivesByName);
-            return false;
-        }
-
-        jobject previousByCriteria = g_env->CallObjectMethod(objectivesByCriteria, g_scoreboardJNI.mMapPut, objectiveCriteria, criteriaObjectives);
-        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
-        if (previousByCriteria) g_env->DeleteLocalRef(previousByCriteria);
-    }
-
-    jboolean containsObjective = g_env->CallBooleanMethod(criteriaObjectives, g_scoreboardJNI.mCollectionContains, objective);
-    if (g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-    } else if (containsObjective != JNI_TRUE) {
-        g_env->CallBooleanMethod(criteriaObjectives, g_scoreboardJNI.mListAdd, objective);
-        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
-    }
-
-    g_env->CallVoidMethod(scoreboard, g_scoreboardJNI.mScoreboardOnObjectiveAdded, objective);
-    if (g_env->ExceptionCheck()) g_env->ExceptionClear();
-
-    g_env->DeleteLocalRef(criteriaObjectives);
-    g_env->DeleteLocalRef(objectiveCriteria);
-    g_env->DeleteLocalRef(objectiveName);
-    g_env->DeleteLocalRef(objectivesByCriteria);
-    g_env->DeleteLocalRef(objectivesByName);
-    return true;
-}
-
-bool RestoreStoredSidebarScores(jobject scoreboard, const std::vector<jobject>& storedScores) {
-    if (!g_env || !scoreboard) return false;
-
-    jobject scoresByEntity = g_env->GetObjectField(scoreboard, g_scoreboardJNI.fScoresByEntity);
-    if (!scoresByEntity || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (scoresByEntity) g_env->DeleteLocalRef(scoresByEntity);
-        return false;
-    }
-
-    for (jobject score : storedScores) {
-        if (!score) continue;
-
-        jstring entityName = (jstring)g_env->GetObjectField(score, g_scoreboardJNI.fScoreEntityName);
-        jobject objective = g_env->GetObjectField(score, g_scoreboardJNI.fScoreObjective);
-        if (!entityName || !objective || g_env->ExceptionCheck()) {
-            g_env->ExceptionClear();
-            if (objective) g_env->DeleteLocalRef(objective);
-            if (entityName) g_env->DeleteLocalRef(entityName);
-            continue;
-        }
-
-        jobject entityScores = g_env->CallObjectMethod(scoresByEntity, g_scoreboardJNI.mMapGet, entityName);
-        if (g_env->ExceptionCheck()) {
-            g_env->ExceptionClear();
-            if (entityScores) g_env->DeleteLocalRef(entityScores);
-            g_env->DeleteLocalRef(objective);
-            g_env->DeleteLocalRef(entityName);
-            continue;
-        }
-
-        if (!entityScores) {
-            entityScores = g_env->NewObject(g_scoreboardJNI.hashMapClass, g_scoreboardJNI.mHashMapCtor);
-            if (!entityScores || g_env->ExceptionCheck()) {
-                g_env->ExceptionClear();
-                if (entityScores) g_env->DeleteLocalRef(entityScores);
-                g_env->DeleteLocalRef(objective);
-                g_env->DeleteLocalRef(entityName);
-                continue;
-            }
-
-            jobject previousEntityScores = g_env->CallObjectMethod(scoresByEntity, g_scoreboardJNI.mMapPut, entityName, entityScores);
-            if (g_env->ExceptionCheck()) g_env->ExceptionClear();
-            if (previousEntityScores) g_env->DeleteLocalRef(previousEntityScores);
-        }
-
-        jobject previousScore = g_env->CallObjectMethod(entityScores, g_scoreboardJNI.mMapPut, objective, score);
-        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
-        if (previousScore) g_env->DeleteLocalRef(previousScore);
-
-        g_env->CallVoidMethod(scoreboard, g_scoreboardJNI.mScoreboardOnScoreUpdated, score);
-        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
-
-        g_env->DeleteLocalRef(entityScores);
-        g_env->DeleteLocalRef(objective);
-        g_env->DeleteLocalRef(entityName);
-    }
-
-    g_env->DeleteLocalRef(scoresByEntity);
     return true;
 }
 
@@ -5327,46 +5173,6 @@ bool TeamEntriesArePlayerUsernames(jobject team) {
     return hasEntries;
 }
 
-std::string GetSingleTeamPlayerName(jobject team) {
-    if (!g_env || !team) return "";
-
-    jobject members = g_env->GetObjectField(team, g_scoreboardJNI.fTeamMembers);
-    if (!members || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (members) g_env->DeleteLocalRef(members);
-        return "";
-    }
-
-    jobjectArray memberArray = (jobjectArray)g_env->CallObjectMethod(members, g_scoreboardJNI.mToArray);
-    g_env->DeleteLocalRef(members);
-    if (!memberArray || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (memberArray) g_env->DeleteLocalRef(memberArray);
-        return "";
-    }
-
-    jsize len = g_env->GetArrayLength(memberArray);
-    std::string playerName;
-    for (jsize i = 0; i < len; i++) {
-        jstring entry = (jstring)g_env->GetObjectArrayElement(memberArray, i);
-        std::string value = JStringToUtf8(entry);
-        if (entry) g_env->DeleteLocalRef(entry);
-
-        if (!IsLikelyPlayerUsername(value)) {
-            g_env->DeleteLocalRef(memberArray);
-            return "";
-        }
-        if (!playerName.empty()) {
-            g_env->DeleteLocalRef(memberArray);
-            return "";
-        }
-        playerName = value;
-    }
-
-    g_env->DeleteLocalRef(memberArray);
-    return playerName;
-}
-
 bool GetPlayerNameAndUuid(jobject player, std::string& name, std::string& uuid) {
     name.clear();
     uuid.clear();
@@ -5418,41 +5224,6 @@ std::string GetPlayerName(jobject player) {
     std::string uuid;
     GetPlayerNameAndUuid(player, name, uuid);
     return name;
-}
-
-void BuildWorldPlayerUuidByName(jobject world, std::unordered_map<std::string, std::string>& uuidByName) {
-    if (!g_env || !world) return;
-
-    jobject players = g_env->GetObjectField(world, g_scoreboardJNI.fPlayerList);
-    if (!players || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (players) g_env->DeleteLocalRef(players);
-        return;
-    }
-
-    jobjectArray playerArray = (jobjectArray)g_env->CallObjectMethod(players, g_scoreboardJNI.mToArray);
-    g_env->DeleteLocalRef(players);
-    if (!playerArray || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (playerArray) g_env->DeleteLocalRef(playerArray);
-        return;
-    }
-
-    jsize len = g_env->GetArrayLength(playerArray);
-    for (jsize i = 0; i < len; i++) {
-        jobject player = g_env->GetObjectArrayElement(playerArray, i);
-        if (!player) continue;
-
-        std::string name;
-        std::string uuid;
-        if (GetPlayerNameAndUuid(player, name, uuid) && IsLikelyPlayerUsername(name) && IsUuidLookupId(uuid)) {
-            uuidByName[NormalizePlayerKey(name)] = uuid;
-        }
-
-        g_env->DeleteLocalRef(player);
-    }
-
-    g_env->DeleteLocalRef(playerArray);
 }
 
 void QueuePublicWinsForWorldPlayers() {
@@ -5695,24 +5466,6 @@ std::string BuildTimerTeamSuffix(const std::string& baseSuffix, const std::strin
     return TruncateSuffixBase(baseSuffix, maxBaseChars) + timerSuffix;
 }
 
-bool SetTeamSuffix(jobject team, const std::string& suffix) {
-    if (!g_env || !team) return false;
-    jstring newSuffix = g_env->NewStringUTF(suffix.c_str());
-    if (!newSuffix || g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        if (newSuffix) g_env->DeleteLocalRef(newSuffix);
-        return false;
-    }
-
-    g_env->SetObjectField(team, g_scoreboardJNI.fTeamF, newSuffix);
-    g_env->DeleteLocalRef(newSuffix);
-    if (g_env->ExceptionCheck()) {
-        g_env->ExceptionClear();
-        return false;
-    }
-    return true;
-}
-
 bool SetTeamStringField(jobject team, jfieldID field, const std::string& value) {
     if (!g_env || !team || !field) return false;
     jstring newValue = g_env->NewStringUTF(value.c_str());
@@ -5736,7 +5489,6 @@ bool SetTeamPrefixAndSuffix(jobject team, const std::string& prefix, const std::
     bool suffixOk = SetTeamStringField(team, g_scoreboardJNI.fTeamF, suffix);
     return prefixOk && suffixOk;
 }
-
 
 bool IsMinecraftFormatCodeAt(const std::string& value, size_t index, size_t& codeLength) {
     if (index < value.size() && value[index] == '\xC2' && index + 2 < value.size() && value[index + 1] == '\xA7') {
@@ -6245,7 +5997,11 @@ void ApplyTimerToPlayerTeams(bool enableTimerSuffix) {
     }
 
     std::string timerSuffix;
-    if (enableTimerSuffix) timerSuffix = MakeTimerSuffix(GetDecimalSeconds());
+    std::string timerPrefix;
+    if (enableTimerSuffix) {
+        timerSuffix = MakeTimerSuffix(GetDecimalSeconds());
+        timerPrefix = MakeTimerPrefix(GetDecimalSeconds());
+    }
 
     jsize len = g_env->GetArrayLength(arr);
     for (jsize i = 0; i < len; i++) {
@@ -6261,6 +6017,9 @@ void ApplyTimerToPlayerTeams(bool enableTimerSuffix) {
             continue;
         }
 
+        jstring prefixStr = (jstring)g_env->GetObjectField(team, g_scoreboardJNI.fTeamE);
+        std::string currentPrefix = JStringToUtf8(prefixStr);
+        if (prefixStr) g_env->DeleteLocalRef(prefixStr);
         jstring suffixStr = (jstring)g_env->GetObjectField(team, g_scoreboardJNI.fTeamF);
         std::string currentSuffix = JStringToUtf8(suffixStr);
         if (suffixStr) g_env->DeleteLocalRef(suffixStr);
@@ -6269,20 +6028,71 @@ void ApplyTimerToPlayerTeams(bool enableTimerSuffix) {
         if (enableTimerSuffix) {
             if (it == g_teamSuffixCache.end()) {
                 TeamSuffixState state;
+                state.basePrefix = currentPrefix;
                 state.baseSuffix = currentSuffix;
                 it = g_teamSuffixCache.emplace(teamName, state).first;
             }
-            else if (!it->second.appliedSuffix.empty() && !EndsWith(currentSuffix, it->second.appliedSuffix)) {
-                it->second.baseSuffix = currentSuffix;
+            else if (!it->second.appliedPrefix.empty() ||
+                !it->second.appliedSuffix.empty()) {
+                if (currentPrefix != it->second.appliedPrefix) {
+                    it->second.basePrefix = currentPrefix;
+                }
+                if (currentSuffix != it->second.appliedSuffix) {
+                    if (!it->second.appliedTimerSuffix.empty() &&
+                        EndsWith(currentSuffix, it->second.appliedTimerSuffix)) {
+                        it->second.baseSuffix = currentSuffix.substr(
+                            0,
+                            currentSuffix.size() -
+                                it->second.appliedTimerSuffix.size());
+                    }
+                    else {
+                        it->second.baseSuffix = currentSuffix;
+                    }
+                }
             }
 
-            std::string desiredSuffix = BuildTimerTeamSuffix(it->second.baseSuffix, timerSuffix);
-            if (currentSuffix != desiredSuffix) SetTeamSuffix(team, desiredSuffix);
-            it->second.appliedSuffix = timerSuffix;
+            std::string desiredPrefix = it->second.basePrefix;
+            std::string desiredSuffix = it->second.baseSuffix;
+            if (NormalizeTimerNametagPosition(g_guiTimerNametagPosition) ==
+                TIMER_NAMETAG_POSITION_PREFIX) {
+                if (NormalizePrefixTntTagPlacement(g_guiTimerPrefixTntTagPlacement) ==
+                    PREFIX_TNT_TAG_PLACEMENT_BEFORE) {
+                    desiredPrefix = timerPrefix + it->second.basePrefix;
+                }
+                else {
+                    desiredPrefix = it->second.basePrefix + timerPrefix +
+                        RestoreMinecraftFormatStateAtEnd(it->second.basePrefix);
+                }
+                it->second.appliedTimerPrefix = timerPrefix;
+                it->second.appliedTimerSuffix.clear();
+            }
+            else {
+                desiredSuffix = BuildTimerTeamSuffix(it->second.baseSuffix, timerSuffix);
+                it->second.appliedTimerPrefix.clear();
+                it->second.appliedTimerSuffix = timerSuffix;
+            }
+            if (currentPrefix != desiredPrefix || currentSuffix != desiredSuffix) {
+                SetTeamPrefixAndSuffix(team, desiredPrefix, desiredSuffix);
+            }
+            it->second.appliedPrefix = desiredPrefix;
+            it->second.appliedSuffix = desiredSuffix;
         }
         else if (it != g_teamSuffixCache.end()) {
-            if (!it->second.appliedSuffix.empty() && EndsWith(currentSuffix, it->second.appliedSuffix) && currentSuffix != it->second.baseSuffix) {
-                SetTeamSuffix(team, it->second.baseSuffix);
+            std::string restorePrefix = currentPrefix == it->second.appliedPrefix
+                ? it->second.basePrefix
+                : currentPrefix;
+            std::string restoreSuffix = currentSuffix == it->second.appliedSuffix
+                ? it->second.baseSuffix
+                : currentSuffix;
+            if (restoreSuffix == currentSuffix &&
+                !it->second.appliedTimerSuffix.empty() &&
+                EndsWith(currentSuffix, it->second.appliedTimerSuffix)) {
+                restoreSuffix.erase(
+                    restoreSuffix.size() - it->second.appliedTimerSuffix.size());
+            }
+            if (restorePrefix != currentPrefix || restoreSuffix != currentSuffix) {
+                SetTeamPrefixAndSuffix(
+                    team, restorePrefix, restoreSuffix);
             }
         }
 
@@ -6301,9 +6111,13 @@ void ApplyTimerToPlayerTeams(bool enableTimerSuffix) {
 
 std::string ReadExplosionTimer(
     bool* outIsLikelyTntTagGame = nullptr,
-    bool* outIsHypixelTntTagGame = nullptr) {
+    bool* outIsHypixelTntTagGame = nullptr,
+    int* outRoundNumber = nullptr,
+    std::string* outMapName = nullptr) {
     if (outIsLikelyTntTagGame) *outIsLikelyTntTagGame = false;
     if (outIsHypixelTntTagGame) *outIsHypixelTntTagGame = false;
+    if (outRoundNumber) *outRoundNumber = -1;
+    if (outMapName) outMapName->clear();
     if (!g_env || !InitScoreboardJNI()) return "";
     try {
         bool foundVoidTagMarker = false;
@@ -6322,11 +6136,14 @@ std::string ReadExplosionTimer(
         bool foundMapLine = false;
         bool foundPlayerLine = false;
         bool foundExactGameMarker = false;
+        int detectedRoundNumber = -1;
+        std::string detectedMapName;
         std::string firstExplosionLine;
         std::string timerLine;
 
         auto observeLine = [&](const std::string& line) {
-            std::string cleanLower = TrimAscii(ToLowerAscii(StripMinecraftFormattingCodes(line)));
+            std::string cleanLine = TrimAscii(StripMinecraftFormattingCodes(line));
+            std::string cleanLower = ToLowerAscii(cleanLine);
             bool hasExplosion = cleanLower.find("explosion") != std::string::npos;
             if (hasExplosion) {
                 foundExplosionLine = true;
@@ -6337,7 +6154,27 @@ std::string ReadExplosionTimer(
                 cleanLower.find("void tag") != std::string::npos) foundVoidTagMarker = true;
             if (cleanLower.find("tnt:") != std::string::npos) foundTntMarker = true;
             if (cleanLower.find("round") != std::string::npos) foundRoundLine = true;
-            if (cleanLower.find("map") != std::string::npos) foundMapLine = true;
+            size_t roundAt = cleanLower.find("round");
+            if (roundAt != std::string::npos && detectedRoundNumber <= 0) {
+                size_t digitAt = cleanLower.find_first_of("0123456789", roundAt + 5);
+                if (digitAt != std::string::npos) {
+                    int parsedRound = atoi(cleanLower.c_str() + digitAt);
+                    if (parsedRound > 0 && parsedRound < 100) {
+                        detectedRoundNumber = parsedRound;
+                    }
+                }
+            }
+            size_t mapAt = cleanLower.find("map:");
+            if (mapAt != std::string::npos) {
+                foundMapLine = true;
+                std::string candidate = TrimAscii(cleanLine.substr(mapAt + 4));
+                if (!candidate.empty() && candidate.size() <= 64) {
+                    detectedMapName = candidate;
+                }
+            }
+            else if (cleanLower.find("map") != std::string::npos) {
+                foundMapLine = true;
+            }
             if (cleanLower.find("players") != std::string::npos ||
                 cleanLower.find("alive") != std::string::npos) foundPlayerLine = true;
             if (cleanLower == "game: tnt tag") foundExactGameMarker = true;
@@ -6405,6 +6242,8 @@ std::string ReadExplosionTimer(
             *outIsLikelyTntTagGame = foundVoidTagMarker || foundHypixelMarker || foundExplosionLine;
         }
         if (outIsHypixelTntTagGame) *outIsHypixelTntTagGame = foundHypixelMarker;
+        if (outRoundNumber) *outRoundNumber = detectedRoundNumber;
+        if (outMapName) *outMapName = detectedMapName;
         return timerLine.empty() ? firstExplosionLine : timerLine;
     }
     catch (...) { g_env->ExceptionClear(); }
@@ -7946,19 +7785,6 @@ bool SetPerspective(int value) {
 // Lunar's own perspective modules conflict with this DLL's Snaplook key handling.
 // Keep both of Lunar's camera-hold modules off while the DLL is loaded without
 // changing the user's persisted Lunar configuration.
-struct LunarPerspectiveGuardJNI {
-    jclass managerClass = nullptr;
-    jclass moduleBaseClass = nullptr;
-    jclass mapClass = nullptr;
-    jclass collectionClass = nullptr;
-    jfieldID fModuleRegistry = nullptr;
-    jfieldID fEnabled = nullptr;
-    jmethodID mMapValues = nullptr;
-    jmethodID mCollectionToArray = nullptr;
-    bool inited = false;
-};
-
-LunarPerspectiveGuardJNI g_lunarPerspectiveGuardJNI;
 
 constexpr const char* kLunarModuleManagerClass =
     "com/moonsworth/lunar/client/HIOHRIRIOIHOICCCCOHCOOIICIICOH/"
@@ -7967,160 +7793,6 @@ constexpr const char* kLunarModuleBaseClass =
     "com/moonsworth/lunar/client/RIHHCHHHROOHOOIOIIRIOOCRHHOOOR/"
     "COOCHIRORIICRCIIRIROHIIRIRICCH";
 constexpr const char* kLunarModuleRegistryField = "RRCRIRHOORRCORHCCOCHIRCHOROORC";
-
-void ResetLunarPerspectiveGuardJNI(JNIEnv* env) {
-    if (env) {
-        if (g_lunarPerspectiveGuardJNI.managerClass) env->DeleteGlobalRef(g_lunarPerspectiveGuardJNI.managerClass);
-        if (g_lunarPerspectiveGuardJNI.moduleBaseClass) env->DeleteGlobalRef(g_lunarPerspectiveGuardJNI.moduleBaseClass);
-        if (g_lunarPerspectiveGuardJNI.mapClass) env->DeleteGlobalRef(g_lunarPerspectiveGuardJNI.mapClass);
-        if (g_lunarPerspectiveGuardJNI.collectionClass) env->DeleteGlobalRef(g_lunarPerspectiveGuardJNI.collectionClass);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-    }
-    g_lunarPerspectiveGuardJNI = {};
-}
-
-bool InitLunarPerspectiveGuardJNI(JNIEnv* env) {
-    if (!IsLunarNamedClient()) return true;
-    if (g_lunarPerspectiveGuardJNI.inited) return true;
-    if (!env) return false;
-
-    auto fail = [&](const char* label) -> bool {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        ResetLunarPerspectiveGuardJNI(env);
-        static std::string lastFailure;
-        if (lastFailure != label) {
-            lastFailure = label;
-            DebugLog("Lunar perspective guard init waiting: %s", label);
-        }
-        return false;
-    };
-
-    jclass managerLocal = FindClassLoose(env, kLunarModuleManagerClass);
-    if (!managerLocal) return fail("module manager class unavailable");
-    g_lunarPerspectiveGuardJNI.managerClass = (jclass)env->NewGlobalRef(managerLocal);
-    env->DeleteLocalRef(managerLocal);
-    if (!g_lunarPerspectiveGuardJNI.managerClass || env->ExceptionCheck()) return fail("module manager global ref");
-
-    jclass moduleBaseLocal = FindClassLoose(env, kLunarModuleBaseClass);
-    if (!moduleBaseLocal) return fail("module base class unavailable");
-    g_lunarPerspectiveGuardJNI.moduleBaseClass = (jclass)env->NewGlobalRef(moduleBaseLocal);
-    env->DeleteLocalRef(moduleBaseLocal);
-    if (!g_lunarPerspectiveGuardJNI.moduleBaseClass || env->ExceptionCheck()) return fail("module base global ref");
-
-    jclass mapLocal = FindClassLoose(env, "java/util/Map");
-    if (!mapLocal) return fail("java.util.Map unavailable");
-    g_lunarPerspectiveGuardJNI.mapClass = (jclass)env->NewGlobalRef(mapLocal);
-    env->DeleteLocalRef(mapLocal);
-    if (!g_lunarPerspectiveGuardJNI.mapClass || env->ExceptionCheck()) return fail("Map global ref");
-
-    jclass collectionLocal = FindClassLoose(env, "java/util/Collection");
-    if (!collectionLocal) return fail("java.util.Collection unavailable");
-    g_lunarPerspectiveGuardJNI.collectionClass = (jclass)env->NewGlobalRef(collectionLocal);
-    env->DeleteLocalRef(collectionLocal);
-    if (!g_lunarPerspectiveGuardJNI.collectionClass || env->ExceptionCheck()) return fail("Collection global ref");
-
-    g_lunarPerspectiveGuardJNI.fModuleRegistry = GetStaticFieldIDCompat(env,
-        g_lunarPerspectiveGuardJNI.managerClass,
-        kLunarModuleRegistryField,
-        "Ljava/util/Map;");
-    if (!g_lunarPerspectiveGuardJNI.fModuleRegistry || env->ExceptionCheck()) return fail("module registry field unavailable");
-
-    g_lunarPerspectiveGuardJNI.fEnabled = GetFieldIDCompat(env,
-        g_lunarPerspectiveGuardJNI.moduleBaseClass,
-        "enabled",
-        "Z");
-    if (!g_lunarPerspectiveGuardJNI.fEnabled || env->ExceptionCheck()) return fail("module enabled field unavailable");
-
-    g_lunarPerspectiveGuardJNI.mMapValues = GetMethodIDCompat(env,
-        g_lunarPerspectiveGuardJNI.mapClass,
-        "values",
-        "()Ljava/util/Collection;");
-    if (!g_lunarPerspectiveGuardJNI.mMapValues || env->ExceptionCheck()) return fail("Map.values unavailable");
-
-    g_lunarPerspectiveGuardJNI.mCollectionToArray = GetMethodIDCompat(env,
-        g_lunarPerspectiveGuardJNI.collectionClass,
-        "toArray",
-        "()[Ljava/lang/Object;");
-    if (!g_lunarPerspectiveGuardJNI.mCollectionToArray || env->ExceptionCheck()) return fail("Collection.toArray unavailable");
-
-    g_lunarPerspectiveGuardJNI.inited = true;
-    DebugLog("Lunar perspective guard initialized");
-    return true;
-}
-
-bool EnforceLunarPerspectiveModulesDisabled(JNIEnv* env) {
-    if (!IsLunarNamedClient()) return true;
-    if (!InitLunarPerspectiveGuardJNI(env)) return false;
-
-    jobject registry = env->GetStaticObjectField(
-        g_lunarPerspectiveGuardJNI.managerClass,
-        g_lunarPerspectiveGuardJNI.fModuleRegistry);
-    if (!registry || env->ExceptionCheck()) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        if (registry) env->DeleteLocalRef(registry);
-        return false;
-    }
-
-    jobject values = env->CallObjectMethod(registry, g_lunarPerspectiveGuardJNI.mMapValues);
-    jobjectArray modules = values && !env->ExceptionCheck()
-        ? (jobjectArray)env->CallObjectMethod(values, g_lunarPerspectiveGuardJNI.mCollectionToArray)
-        : nullptr;
-    if (!values || !modules || env->ExceptionCheck()) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        if (modules) env->DeleteLocalRef(modules);
-        if (values) env->DeleteLocalRef(values);
-        env->DeleteLocalRef(registry);
-        return false;
-    }
-
-    int foundCount = 0;
-    int disabledCount = 0;
-    jsize moduleCount = env->GetArrayLength(modules);
-    for (jsize index = 0; index < moduleCount; ++index) {
-        jobject module = env->GetObjectArrayElement(modules, index);
-        if (!module || env->ExceptionCheck()) {
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            if (module) env->DeleteLocalRef(module);
-            continue;
-        }
-
-        jclass moduleClass = env->GetObjectClass(module);
-        jmethodID getId = moduleClass
-            ? GetMethodIDCompat(env, moduleClass, "getId", "()Ljava/lang/String;")
-            : nullptr;
-        jstring idString = getId && !env->ExceptionCheck()
-            ? (jstring)env->CallObjectMethod(module, getId)
-            : nullptr;
-        if (env->ExceptionCheck()) env->ExceptionClear();
-
-        std::string moduleId = idString ? ToLowerAscii(JStringToUtf8(env, idString)) : "";
-        bool isConflictingModule = moduleId == "snaplook" || moduleId == "freelook";
-        if (isConflictingModule) {
-            ++foundCount;
-            jboolean wasEnabled = env->GetBooleanField(module, g_lunarPerspectiveGuardJNI.fEnabled);
-            if (!env->ExceptionCheck() && wasEnabled == JNI_TRUE) {
-                env->SetBooleanField(module, g_lunarPerspectiveGuardJNI.fEnabled, JNI_FALSE);
-                if (!env->ExceptionCheck()) ++disabledCount;
-            }
-            if (env->ExceptionCheck()) env->ExceptionClear();
-        }
-
-        if (idString) env->DeleteLocalRef(idString);
-        if (moduleClass) env->DeleteLocalRef(moduleClass);
-        env->DeleteLocalRef(module);
-    }
-
-    env->DeleteLocalRef(modules);
-    env->DeleteLocalRef(values);
-    env->DeleteLocalRef(registry);
-
-    static int lastFoundCount = -1;
-    if (disabledCount > 0 || foundCount != lastFoundCount) {
-        lastFoundCount = foundCount;
-        DebugLog("Lunar perspective guard modulesFound=%d modulesDisabled=%d", foundCount, disabledCount);
-    }
-    return foundCount >= 2;
-}
 
 static jclass g_glContextClass = nullptr;
 static jmethodID g_glGetCapabilities = nullptr;
@@ -8225,57 +7897,6 @@ bool SetSharedJvmtiCallbacks(const char* label) {
     jvmtiError err = g_jvmti->SetEventCallbacks(&callbacks, sizeof(callbacks));
     if (err != JVMTI_ERROR_NONE) {
         DebugLog("%s JVMTI SetEventCallbacks failed err=%d", label ? label : "Shared", (int)err);
-        return false;
-    }
-
-    return true;
-}
-
-bool EnsureMutedVoicePacketFilterCapabilities() {
-    if (!g_jvmti) return false;
-
-    jvmtiCapabilities caps = {};
-    jvmtiError err = g_jvmti->GetCapabilities(&caps);
-    if (err != JVMTI_ERROR_NONE) {
-        DebugLog("Muted Voice packet filter JVMTI GetCapabilities failed err=%d", (int)err);
-        InterlockedExchange(&g_mutedVoicePacketFilterFailed, 1);
-        return false;
-    }
-
-    bool needsAdd =
-        !caps.can_generate_breakpoint_events ||
-        !caps.can_force_early_return ||
-        !caps.can_access_local_variables;
-    if (needsAdd) {
-        jvmtiCapabilities requested = {};
-        requested.can_generate_breakpoint_events = caps.can_generate_breakpoint_events ? 0 : 1;
-        requested.can_force_early_return = caps.can_force_early_return ? 0 : 1;
-        requested.can_access_local_variables = caps.can_access_local_variables ? 0 : 1;
-
-        err = g_jvmti->AddCapabilities(&requested);
-        if (err != JVMTI_ERROR_NONE) {
-            DebugLog("Muted Voice packet filter JVMTI AddCapabilities failed err=%d breakpoint=%d earlyReturn=%d locals=%d",
-                (int)err,
-                requested.can_generate_breakpoint_events ? 1 : 0,
-                requested.can_force_early_return ? 1 : 0,
-                requested.can_access_local_variables ? 1 : 0);
-            InterlockedExchange(&g_mutedVoicePacketFilterFailed, 1);
-            return false;
-        }
-    }
-
-    caps = {};
-    err = g_jvmti->GetCapabilities(&caps);
-    if (err != JVMTI_ERROR_NONE ||
-        !caps.can_generate_breakpoint_events ||
-        !caps.can_force_early_return ||
-        !caps.can_access_local_variables) {
-        DebugLog("Muted Voice packet filter missing JVMTI caps err=%d breakpoint=%d earlyReturn=%d locals=%d",
-            (int)err,
-            caps.can_generate_breakpoint_events ? 1 : 0,
-            caps.can_force_early_return ? 1 : 0,
-            caps.can_access_local_variables ? 1 : 0);
-        InterlockedExchange(&g_mutedVoicePacketFilterFailed, 1);
         return false;
     }
 
@@ -8495,64 +8116,6 @@ void ShutdownMutedVoicePacketFilter() {
     InterlockedExchange(&g_mutedVoicePacketFilterInstalled, 0);
 }
 
-bool GetSeeBarriersBarrierClass(JNIEnv* env, jclass& outClass) {
-    outClass = nullptr;
-    if (!env) return false;
-    if (g_seeBarriersBarrierClass) {
-        outClass = g_seeBarriersBarrierClass;
-        return true;
-    }
-
-    if (g_seeBarriersBlockClass && g_seeBarriersBlockGetById) {
-        jobject barrierBlock = env->CallStaticObjectMethod(g_seeBarriersBlockClass, g_seeBarriersBlockGetById, (jint)166);
-        if (barrierBlock && !env->ExceptionCheck()) {
-            jclass runtimeClass = env->GetObjectClass(barrierBlock);
-            env->DeleteLocalRef(barrierBlock);
-            if (runtimeClass && !env->ExceptionCheck()) {
-                g_seeBarriersBarrierClass = (jclass)env->NewGlobalRef(runtimeClass);
-                env->DeleteLocalRef(runtimeClass);
-                if (!g_seeBarriersBarrierClass || env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                    g_seeBarriersBarrierClass = nullptr;
-                    DebugLog("See Barriers failed to global-ref runtime barrier class");
-                    return false;
-                }
-
-                outClass = g_seeBarriersBarrierClass;
-                DebugLog("See Barriers resolved BlockBarrier class from runtime block id=166");
-                return true;
-            }
-
-            if (runtimeClass) env->DeleteLocalRef(runtimeClass);
-        }
-        else {
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            if (barrierBlock) env->DeleteLocalRef(barrierBlock);
-        }
-    }
-
-    jclass localClass = FindClassLoose(env, "afb");
-    if (!localClass || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (localClass) env->DeleteLocalRef(localClass);
-        DebugLog("See Barriers failed to find BlockBarrier class afb");
-        return false;
-    }
-
-    g_seeBarriersBarrierClass = (jclass)env->NewGlobalRef(localClass);
-    env->DeleteLocalRef(localClass);
-    if (!g_seeBarriersBarrierClass || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        g_seeBarriersBarrierClass = nullptr;
-        DebugLog("See Barriers failed to global-ref BlockBarrier class");
-        return false;
-    }
-
-    outClass = g_seeBarriersBarrierClass;
-    DebugLog("See Barriers resolved BlockBarrier class by class lookup fallback");
-    return true;
-}
-
 bool ReadJavaInputStream(JNIEnv* env, jobject stream, std::vector<unsigned char>& outBytes) {
     outBytes.clear();
     if (!env || !stream) return false;
@@ -8708,25 +8271,6 @@ jobject OpenClassLoaderResourceStream(JNIEnv* env, jclass targetClass, const cha
     }
 
     return stream;
-}
-
-bool LoadBarrierClassBytes(JNIEnv* env, std::vector<unsigned char>& outBytes) {
-    outBytes.clear();
-    jclass barrierClass = nullptr;
-    if (!GetSeeBarriersBarrierClass(env, barrierClass)) return false;
-
-    jobject stream = OpenClassResourceStream(env, barrierClass, "afb.class");
-    if (!stream) stream = OpenClassResourceStream(env, barrierClass, "/afb.class");
-    if (!stream) stream = OpenClassLoaderResourceStream(env, barrierClass, "afb.class");
-    if (!stream) {
-        DebugLog("See Barriers failed to open afb.class resource");
-        return false;
-    }
-
-    bool ok = ReadJavaInputStream(env, stream, outBytes);
-    env->DeleteLocalRef(stream);
-    if (!ok) DebugLog("See Barriers failed to read afb.class bytes");
-    return ok;
 }
 
 bool ReadClassU1(const std::vector<unsigned char>& bytes, size_t& offset, unsigned char& value) {
@@ -9357,731 +8901,6 @@ bool EnsureMutedVoiceS02PacketChatBytecode(JNIEnv* env) {
     return true;
 }
 
-bool PatchBarrierClassGetRenderType(const std::vector<unsigned char>& originalBytes, std::vector<unsigned char>& patchedBytes) {
-    patchedBytes = originalBytes;
-    size_t offset = 0;
-
-    uint32_t magic = 0;
-    uint16_t minorVersion = 0;
-    uint16_t majorVersion = 0;
-    uint16_t constantPoolCount = 0;
-    if (!ReadClassU4(patchedBytes, offset, magic) ||
-        magic != 0xCAFEBABE ||
-        !ReadClassU2(patchedBytes, offset, minorVersion) ||
-        !ReadClassU2(patchedBytes, offset, majorVersion) ||
-        !ReadClassU2(patchedBytes, offset, constantPoolCount)) {
-        DebugLog("See Barriers invalid afb.class header");
-        return false;
-    }
-
-    std::vector<std::string> utf8Constants((size_t)constantPoolCount);
-    for (uint16_t i = 1; i < constantPoolCount; ++i) {
-        unsigned char tag = 0;
-        if (!ReadClassU1(patchedBytes, offset, tag)) return false;
-
-        switch (tag) {
-        case 1: {
-            uint16_t length = 0;
-            if (!ReadClassU2(patchedBytes, offset, length) ||
-                offset + length > patchedBytes.size()) {
-                return false;
-            }
-            utf8Constants[(size_t)i] = std::string(
-                reinterpret_cast<const char*>(&patchedBytes[offset]),
-                (size_t)length);
-            offset += length;
-            break;
-        }
-        case 3:
-        case 4:
-            if (!AdvanceClassBytes(patchedBytes, offset, 4)) return false;
-            break;
-        case 5:
-        case 6:
-            if (!AdvanceClassBytes(patchedBytes, offset, 8)) return false;
-            ++i;
-            break;
-        case 7:
-        case 8:
-        case 16:
-            if (!AdvanceClassBytes(patchedBytes, offset, 2)) return false;
-            break;
-        case 9:
-        case 10:
-        case 11:
-        case 12:
-        case 18:
-            if (!AdvanceClassBytes(patchedBytes, offset, 4)) return false;
-            break;
-        case 15:
-            if (!AdvanceClassBytes(patchedBytes, offset, 3)) return false;
-            break;
-        default:
-            DebugLog("See Barriers unsupported classfile constant tag=%u", (unsigned int)tag);
-            return false;
-        }
-    }
-
-    if (!AdvanceClassBytes(patchedBytes, offset, 6)) return false; // access_flags, this_class, super_class
-
-    uint16_t interfacesCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, interfacesCount) ||
-        !AdvanceClassBytes(patchedBytes, offset, (size_t)interfacesCount * 2)) {
-        return false;
-    }
-
-    uint16_t fieldsCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, fieldsCount)) return false;
-    for (uint16_t i = 0; i < fieldsCount; ++i) {
-        if (!SkipClassMemberInfo(patchedBytes, offset)) return false;
-    }
-
-    uint16_t methodsCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, methodsCount)) return false;
-    for (uint16_t i = 0; i < methodsCount; ++i) {
-        uint16_t accessFlags = 0;
-        uint16_t nameIndex = 0;
-        uint16_t descriptorIndex = 0;
-        uint16_t attributesCount = 0;
-        if (!ReadClassU2(patchedBytes, offset, accessFlags) ||
-            !ReadClassU2(patchedBytes, offset, nameIndex) ||
-            !ReadClassU2(patchedBytes, offset, descriptorIndex) ||
-            !ReadClassU2(patchedBytes, offset, attributesCount)) {
-            return false;
-        }
-
-        const std::string methodName =
-            nameIndex < utf8Constants.size() ? utf8Constants[(size_t)nameIndex] : std::string();
-        const std::string descriptor =
-            descriptorIndex < utf8Constants.size() ? utf8Constants[(size_t)descriptorIndex] : std::string();
-
-        for (uint16_t attr = 0; attr < attributesCount; ++attr) {
-            uint16_t attributeNameIndex = 0;
-            uint32_t attributeLength = 0;
-            if (!ReadClassU2(patchedBytes, offset, attributeNameIndex) ||
-                !ReadClassU4(patchedBytes, offset, attributeLength)) {
-                return false;
-            }
-
-            size_t attributeStart = offset;
-            if (!AdvanceClassBytes(patchedBytes, offset, (size_t)attributeLength)) return false;
-            size_t attributeEnd = offset;
-            const std::string attributeName =
-                attributeNameIndex < utf8Constants.size() ? utf8Constants[(size_t)attributeNameIndex] : std::string();
-
-            if (methodName == "b" && descriptor == "()I" && attributeName == "Code") {
-                size_t codeOffset = attributeStart;
-                uint16_t maxStack = 0;
-                uint16_t maxLocals = 0;
-                uint32_t codeLength = 0;
-                if (!ReadClassU2(patchedBytes, codeOffset, maxStack) ||
-                    !ReadClassU2(patchedBytes, codeOffset, maxLocals) ||
-                    !ReadClassU4(patchedBytes, codeOffset, codeLength) ||
-                    codeLength < 2 ||
-                    codeOffset + codeLength > attributeEnd ||
-                    maxStack < 1 ||
-                    maxLocals < 1) {
-                    DebugLog("See Barriers unsupported BlockBarrier.getRenderType Code attribute");
-                    return false;
-                }
-
-                patchedBytes[codeOffset] = 0x06; // iconst_3
-                patchedBytes[codeOffset + 1] = 0xAC; // ireturn
-                for (uint32_t n = 2; n < codeLength; ++n) {
-                    patchedBytes[codeOffset + (size_t)n] = 0x00; // nop
-                }
-
-                DebugLog("See Barriers patched afb.b()I codeLength=%u version=%u.%u",
-                    (unsigned int)codeLength,
-                    (unsigned int)majorVersion,
-                    (unsigned int)minorVersion);
-                return true;
-            }
-        }
-    }
-
-    DebugLog("See Barriers failed to find afb.b()I Code attribute");
-    return false;
-}
-
-bool EnsureBarrierClassBytecode(JNIEnv* env) {
-    if (!g_seeBarriersOriginalClassBytes.empty() && !g_seeBarriersPatchedClassBytes.empty()) return true;
-
-    if (!LoadBarrierClassBytes(env, g_seeBarriersOriginalClassBytes)) {
-        g_seeBarriersOriginalClassBytes.clear();
-        g_seeBarriersPatchedClassBytes.clear();
-        return false;
-    }
-
-    if (!PatchBarrierClassGetRenderType(g_seeBarriersOriginalClassBytes, g_seeBarriersPatchedClassBytes)) {
-        g_seeBarriersOriginalClassBytes.clear();
-        g_seeBarriersPatchedClassBytes.clear();
-        return false;
-    }
-
-    DebugLog("See Barriers loaded afb.class bytes=%u", (unsigned int)g_seeBarriersOriginalClassBytes.size());
-    return true;
-}
-
-bool LoadBlockDamageDispatcherClassBytes(JNIEnv* env, std::vector<unsigned char>& outBytes) {
-    outBytes.clear();
-    if (!EnsureSeeBarriersModelOverrideJNI(env) || !g_seeBarriersBlockRendererDispatcherClass) return false;
-
-    jobject stream = OpenClassResourceStream(env, g_seeBarriersBlockRendererDispatcherClass, "bgd.class");
-    if (!stream) stream = OpenClassResourceStream(env, g_seeBarriersBlockRendererDispatcherClass, "/bgd.class");
-    if (!stream) stream = OpenClassLoaderResourceStream(env, g_seeBarriersBlockRendererDispatcherClass, "bgd.class");
-    if (!stream) {
-        DebugLog("See Barriers failed to open bgd.class resource");
-        return false;
-    }
-
-    bool ok = ReadJavaInputStream(env, stream, outBytes);
-    env->DeleteLocalRef(stream);
-    if (!ok) DebugLog("See Barriers failed to read bgd.class bytes");
-    return ok;
-}
-
-bool GetSeeBarriersRenderChunkClass(JNIEnv* env, jclass& outClass) {
-    outClass = nullptr;
-    if (!env) return false;
-    if (g_seeBarriersRenderChunkClass) {
-        outClass = g_seeBarriersRenderChunkClass;
-        return true;
-    }
-
-    jclass localClass = FindClassLoose(env, "bht");
-    if (!localClass || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (localClass) env->DeleteLocalRef(localClass);
-        DebugLog("See Barriers failed to find RenderChunk class bht");
-        return false;
-    }
-
-    g_seeBarriersRenderChunkClass = (jclass)env->NewGlobalRef(localClass);
-    env->DeleteLocalRef(localClass);
-    if (!g_seeBarriersRenderChunkClass || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (g_seeBarriersRenderChunkClass) env->DeleteGlobalRef(g_seeBarriersRenderChunkClass);
-        g_seeBarriersRenderChunkClass = nullptr;
-        DebugLog("See Barriers failed to global-ref RenderChunk class");
-        return false;
-    }
-
-    outClass = g_seeBarriersRenderChunkClass;
-    DebugLog("See Barriers resolved RenderChunk class bht");
-    return true;
-}
-
-bool LoadRenderChunkClassBytes(JNIEnv* env, std::vector<unsigned char>& outBytes) {
-    outBytes.clear();
-    jclass renderChunkClass = nullptr;
-    if (!GetSeeBarriersRenderChunkClass(env, renderChunkClass)) return false;
-
-    jobject stream = OpenClassResourceStream(env, renderChunkClass, "bht.class");
-    if (!stream) stream = OpenClassResourceStream(env, renderChunkClass, "/bht.class");
-    if (!stream) stream = OpenClassLoaderResourceStream(env, renderChunkClass, "bht.class");
-    if (!stream) {
-        DebugLog("See Barriers failed to open bht.class resource");
-        return false;
-    }
-
-    bool ok = ReadJavaInputStream(env, stream, outBytes);
-    env->DeleteLocalRef(stream);
-    if (!ok) DebugLog("See Barriers failed to read bht.class bytes");
-    return ok;
-}
-
-bool PatchBlockRendererDispatcherSeeBarriers(const std::vector<unsigned char>& originalBytes, std::vector<unsigned char>& patchedBytes) {
-    patchedBytes = originalBytes;
-    size_t offset = 0;
-
-    uint32_t magic = 0;
-    uint16_t minorVersion = 0;
-    uint16_t majorVersion = 0;
-    uint16_t constantPoolCount = 0;
-    if (!ReadClassU4(patchedBytes, offset, magic) ||
-        magic != 0xCAFEBABE ||
-        !ReadClassU2(patchedBytes, offset, minorVersion) ||
-        !ReadClassU2(patchedBytes, offset, majorVersion) ||
-        !ReadClassU2(patchedBytes, offset, constantPoolCount)) {
-        DebugLog("See Barriers invalid bgd.class header");
-        return false;
-    }
-
-    std::vector<std::string> utf8Constants((size_t)constantPoolCount);
-    for (uint16_t i = 1; i < constantPoolCount; ++i) {
-        unsigned char tag = 0;
-        if (!ReadClassU1(patchedBytes, offset, tag)) return false;
-
-        switch (tag) {
-        case 1: {
-            uint16_t length = 0;
-            if (!ReadClassU2(patchedBytes, offset, length) ||
-                offset + length > patchedBytes.size()) {
-                return false;
-            }
-            utf8Constants[(size_t)i] = std::string(
-                reinterpret_cast<const char*>(&patchedBytes[offset]),
-                (size_t)length);
-            offset += length;
-            break;
-        }
-        case 3:
-        case 4:
-            if (!AdvanceClassBytes(patchedBytes, offset, 4)) return false;
-            break;
-        case 5:
-        case 6:
-            if (!AdvanceClassBytes(patchedBytes, offset, 8)) return false;
-            ++i;
-            break;
-        case 7:
-        case 8:
-        case 16:
-            if (!AdvanceClassBytes(patchedBytes, offset, 2)) return false;
-            break;
-        case 9:
-        case 10:
-        case 11:
-        case 12:
-        case 18:
-            if (!AdvanceClassBytes(patchedBytes, offset, 4)) return false;
-            break;
-        case 15:
-            if (!AdvanceClassBytes(patchedBytes, offset, 3)) return false;
-            break;
-        default:
-            DebugLog("See Barriers unsupported bgd.class constant tag=%u", (unsigned int)tag);
-            return false;
-        }
-    }
-
-    if (!AdvanceClassBytes(patchedBytes, offset, 6)) return false; // access_flags, this_class, super_class
-
-    uint16_t interfacesCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, interfacesCount) ||
-        !AdvanceClassBytes(patchedBytes, offset, (size_t)interfacesCount * 2)) {
-        return false;
-    }
-
-    uint16_t fieldsCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, fieldsCount)) return false;
-    for (uint16_t i = 0; i < fieldsCount; ++i) {
-        if (!SkipClassMemberInfo(patchedBytes, offset)) return false;
-    }
-
-    auto readCodeS4 = [&patchedBytes](size_t at, int32_t& value) -> bool {
-        if (at + 4 > patchedBytes.size()) return false;
-        value =
-            ((int32_t)patchedBytes[at] << 24) |
-            ((int32_t)patchedBytes[at + 1] << 16) |
-            ((int32_t)patchedBytes[at + 2] << 8) |
-            (int32_t)patchedBytes[at + 3];
-        return true;
-    };
-
-    auto writeCodeS4 = [&patchedBytes](size_t at, int32_t value) -> bool {
-        if (at + 4 > patchedBytes.size()) return false;
-        patchedBytes[at] = (unsigned char)((value >> 24) & 0xFF);
-        patchedBytes[at + 1] = (unsigned char)((value >> 16) & 0xFF);
-        patchedBytes[at + 2] = (unsigned char)((value >> 8) & 0xFF);
-        patchedBytes[at + 3] = (unsigned char)(value & 0xFF);
-        return true;
-    };
-
-    bool damageOverlayPatched = false;
-    bool worldRenderPatched = false;
-
-    uint16_t methodsCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, methodsCount)) return false;
-    for (uint16_t i = 0; i < methodsCount; ++i) {
-        uint16_t accessFlags = 0;
-        uint16_t nameIndex = 0;
-        uint16_t descriptorIndex = 0;
-        uint16_t attributesCount = 0;
-        if (!ReadClassU2(patchedBytes, offset, accessFlags) ||
-            !ReadClassU2(patchedBytes, offset, nameIndex) ||
-            !ReadClassU2(patchedBytes, offset, descriptorIndex) ||
-            !ReadClassU2(patchedBytes, offset, attributesCount)) {
-            return false;
-        }
-
-        const std::string methodName =
-            nameIndex < utf8Constants.size() ? utf8Constants[(size_t)nameIndex] : std::string();
-        const std::string descriptor =
-            descriptorIndex < utf8Constants.size() ? utf8Constants[(size_t)descriptorIndex] : std::string();
-
-        for (uint16_t attr = 0; attr < attributesCount; ++attr) {
-            uint16_t attributeNameIndex = 0;
-            uint32_t attributeLength = 0;
-            if (!ReadClassU2(patchedBytes, offset, attributeNameIndex) ||
-                !ReadClassU4(patchedBytes, offset, attributeLength)) {
-                return false;
-            }
-
-            size_t attributeStart = offset;
-            if (!AdvanceClassBytes(patchedBytes, offset, (size_t)attributeLength)) return false;
-            size_t attributeEnd = offset;
-            const std::string attributeName =
-                attributeNameIndex < utf8Constants.size() ? utf8Constants[(size_t)attributeNameIndex] : std::string();
-
-            if (methodName == "a" && descriptor == "(Lalz;Lcj;Lbmi;Ladq;)V" && attributeName == "Code") {
-                size_t codeOffset = attributeStart;
-                uint16_t maxStack = 0;
-                uint16_t maxLocals = 0;
-                uint32_t codeLength = 0;
-                if (!ReadClassU2(patchedBytes, codeOffset, maxStack) ||
-                    !ReadClassU2(patchedBytes, codeOffset, maxLocals) ||
-                    !ReadClassU4(patchedBytes, codeOffset, codeLength) ||
-                    codeOffset + codeLength > attributeEnd ||
-                    maxStack < 1 ||
-                    maxLocals < 7) {
-                    DebugLog("See Barriers unsupported bgd damage-overlay Code attribute");
-                    return false;
-                }
-
-                for (uint32_t codeIndex = 0; codeIndex + 6 < codeLength; ++codeIndex) {
-                    size_t p = codeOffset + (size_t)codeIndex;
-                    if (patchedBytes[p] == 0x15 && patchedBytes[p + 1] == 0x06 &&
-                        patchedBytes[p + 2] == 0x06 &&
-                        patchedBytes[p + 3] == 0x9F &&
-                        patchedBytes[p + 6] == 0xB1) {
-                        for (size_t n = 0; n < 7; ++n) patchedBytes[p + n] = 0x00;
-                        DebugLog("See Barriers patched bgd damage overlay gate codeLength=%u offset=%u version=%u.%u",
-                            (unsigned int)codeLength,
-                            (unsigned int)codeIndex,
-                            (unsigned int)majorVersion,
-                            (unsigned int)minorVersion);
-                        damageOverlayPatched = true;
-                        break;
-                    }
-                }
-
-                if (!damageOverlayPatched) {
-                    DebugLog("See Barriers failed to find bgd damage overlay gate pattern");
-                    return false;
-                }
-            }
-
-            if (methodName == "a" && descriptor == "(Lalz;Lcj;Ladq;Lbfd;)Z" && attributeName == "Code") {
-                size_t codeOffset = attributeStart;
-                uint16_t maxStack = 0;
-                uint16_t maxLocals = 0;
-                uint32_t codeLength = 0;
-                if (!ReadClassU2(patchedBytes, codeOffset, maxStack) ||
-                    !ReadClassU2(patchedBytes, codeOffset, maxLocals) ||
-                    !ReadClassU4(patchedBytes, codeOffset, codeLength) ||
-                    codeOffset + codeLength > attributeEnd ||
-                    maxStack < 1 ||
-                    maxLocals < 6) {
-                    DebugLog("See Barriers unsupported bgd world-render Code attribute");
-                    return false;
-                }
-
-                size_t codeStart = codeOffset;
-                bool earlyReturnPatched = false;
-                for (uint32_t codeIndex = 0; codeIndex + 7 < codeLength; ++codeIndex) {
-                    size_t p = codeStart + (size_t)codeIndex;
-                    if (patchedBytes[p] == 0x15 &&
-                        patchedBytes[p + 2] == 0x02 &&
-                        patchedBytes[p + 3] == 0xA0 &&
-                        patchedBytes[p + 6] == 0x03 &&
-                        patchedBytes[p + 7] == 0xAC) {
-                        for (size_t n = 0; n < 8; ++n) patchedBytes[p + n] = 0x00;
-                        earlyReturnPatched = true;
-                        DebugLog("See Barriers patched bgd world-render early return codeLength=%u offset=%u version=%u.%u",
-                            (unsigned int)codeLength,
-                            (unsigned int)codeIndex,
-                            (unsigned int)majorVersion,
-                            (unsigned int)minorVersion);
-                        break;
-                    }
-                }
-
-                if (!earlyReturnPatched) {
-                    DebugLog("See Barriers failed to find bgd world-render early return pattern");
-                    return false;
-                }
-
-                bool switchPatched = false;
-                for (uint32_t codeIndex = 0; codeIndex < codeLength; ++codeIndex) {
-                    size_t opcodeAt = codeStart + (size_t)codeIndex;
-                    if (patchedBytes[opcodeAt] != 0xAA) continue;
-
-                    size_t alignedAt = opcodeAt + 1;
-                    while (((alignedAt - codeStart) & 3u) != 0u) ++alignedAt;
-                    if (alignedAt + 24 > codeStart + codeLength) continue;
-
-                    int32_t defaultOffset = 0;
-                    int32_t low = 0;
-                    int32_t high = 0;
-                    if (!readCodeS4(alignedAt, defaultOffset) ||
-                        !readCodeS4(alignedAt + 4, low) ||
-                        !readCodeS4(alignedAt + 8, high)) {
-                        continue;
-                    }
-
-                    if (low != 1 || high != 3) continue;
-
-                    int32_t caseThreeOffset = 0;
-                    size_t jumpTableAt = alignedAt + 12;
-                    if (!readCodeS4(jumpTableAt + 8, caseThreeOffset)) continue;
-                    if (!writeCodeS4(alignedAt, caseThreeOffset)) continue;
-
-                    switchPatched = true;
-                    DebugLog("See Barriers patched bgd world-render default->case3 codeLength=%u offset=%u version=%u.%u",
-                        (unsigned int)codeLength,
-                        (unsigned int)codeIndex,
-                        (unsigned int)majorVersion,
-                        (unsigned int)minorVersion);
-                    break;
-                }
-
-                if (!switchPatched) {
-                    DebugLog("See Barriers failed to find bgd world-render tableswitch");
-                    return false;
-                }
-
-                worldRenderPatched = true;
-            }
-        }
-    }
-
-    if (!damageOverlayPatched) {
-        DebugLog("See Barriers failed to find bgd.a(alz,cj,bmi,adq) Code attribute");
-        return false;
-    }
-    if (!worldRenderPatched) {
-        DebugLog("See Barriers failed to find bgd.a(alz,cj,adq,bfd) Code attribute");
-        return false;
-    }
-
-    return true;
-}
-
-bool PatchRenderChunkSeeBarriers(const std::vector<unsigned char>& originalBytes, std::vector<unsigned char>& patchedBytes) {
-    patchedBytes = originalBytes;
-    size_t offset = 0;
-
-    uint32_t magic = 0;
-    uint16_t minorVersion = 0;
-    uint16_t majorVersion = 0;
-    uint16_t constantPoolCount = 0;
-    if (!ReadClassU4(patchedBytes, offset, magic) ||
-        magic != 0xCAFEBABE ||
-        !ReadClassU2(patchedBytes, offset, minorVersion) ||
-        !ReadClassU2(patchedBytes, offset, majorVersion) ||
-        !ReadClassU2(patchedBytes, offset, constantPoolCount)) {
-        DebugLog("See Barriers invalid bht.class header");
-        return false;
-    }
-
-    std::vector<std::string> utf8Constants((size_t)constantPoolCount);
-    for (uint16_t i = 1; i < constantPoolCount; ++i) {
-        unsigned char tag = 0;
-        if (!ReadClassU1(patchedBytes, offset, tag)) return false;
-
-        switch (tag) {
-        case 1: {
-            uint16_t length = 0;
-            if (!ReadClassU2(patchedBytes, offset, length) ||
-                offset + length > patchedBytes.size()) {
-                return false;
-            }
-            utf8Constants[(size_t)i] = std::string(
-                reinterpret_cast<const char*>(&patchedBytes[offset]),
-                (size_t)length);
-            offset += length;
-            break;
-        }
-        case 3:
-        case 4:
-            if (!AdvanceClassBytes(patchedBytes, offset, 4)) return false;
-            break;
-        case 5:
-        case 6:
-            if (!AdvanceClassBytes(patchedBytes, offset, 8)) return false;
-            ++i;
-            break;
-        case 7:
-        case 8:
-        case 16:
-            if (!AdvanceClassBytes(patchedBytes, offset, 2)) return false;
-            break;
-        case 9:
-        case 10:
-        case 11:
-        case 12:
-        case 18:
-            if (!AdvanceClassBytes(patchedBytes, offset, 4)) return false;
-            break;
-        case 15:
-            if (!AdvanceClassBytes(patchedBytes, offset, 3)) return false;
-            break;
-        default:
-            DebugLog("See Barriers unsupported bht.class constant tag=%u", (unsigned int)tag);
-            return false;
-        }
-    }
-
-    if (!AdvanceClassBytes(patchedBytes, offset, 6)) return false;
-
-    uint16_t interfacesCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, interfacesCount) ||
-        !AdvanceClassBytes(patchedBytes, offset, (size_t)interfacesCount * 2)) {
-        return false;
-    }
-
-    uint16_t fieldsCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, fieldsCount)) return false;
-    for (uint16_t i = 0; i < fieldsCount; ++i) {
-        if (!SkipClassMemberInfo(patchedBytes, offset)) return false;
-    }
-
-    bool rebuildPatched = false;
-
-    uint16_t methodsCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, methodsCount)) return false;
-    for (uint16_t i = 0; i < methodsCount; ++i) {
-        uint16_t accessFlags = 0;
-        uint16_t nameIndex = 0;
-        uint16_t descriptorIndex = 0;
-        uint16_t attributesCount = 0;
-        if (!ReadClassU2(patchedBytes, offset, accessFlags) ||
-            !ReadClassU2(patchedBytes, offset, nameIndex) ||
-            !ReadClassU2(patchedBytes, offset, descriptorIndex) ||
-            !ReadClassU2(patchedBytes, offset, attributesCount)) {
-            return false;
-        }
-
-        const std::string methodName =
-            nameIndex < utf8Constants.size() ? utf8Constants[(size_t)nameIndex] : std::string();
-        const std::string descriptor =
-            descriptorIndex < utf8Constants.size() ? utf8Constants[(size_t)descriptorIndex] : std::string();
-
-        for (uint16_t attr = 0; attr < attributesCount; ++attr) {
-            uint16_t attributeNameIndex = 0;
-            uint32_t attributeLength = 0;
-            if (!ReadClassU2(patchedBytes, offset, attributeNameIndex) ||
-                !ReadClassU4(patchedBytes, offset, attributeLength)) {
-                return false;
-            }
-
-            size_t attributeStart = offset;
-            if (!AdvanceClassBytes(patchedBytes, offset, (size_t)attributeLength)) return false;
-            size_t attributeEnd = offset;
-            const std::string attributeName =
-                attributeNameIndex < utf8Constants.size() ? utf8Constants[(size_t)attributeNameIndex] : std::string();
-
-            if (methodName == "b" && descriptor == "(FFFLbhn;)V" && attributeName == "Code") {
-                size_t codeOffset = attributeStart;
-                uint16_t maxStack = 0;
-                uint16_t maxLocals = 0;
-                uint32_t codeLength = 0;
-                if (!ReadClassU2(patchedBytes, codeOffset, maxStack) ||
-                    !ReadClassU2(patchedBytes, codeOffset, maxLocals) ||
-                    !ReadClassU4(patchedBytes, codeOffset, codeLength) ||
-                    codeLength < 8 ||
-                    codeOffset + codeLength > attributeEnd) {
-                    DebugLog("See Barriers unsupported bht.b(FFFLbhn;)V Code attribute");
-                    return false;
-                }
-
-                size_t codeStart = codeOffset;
-                for (uint32_t codeIndex = 3; codeIndex + 6 < codeLength; ++codeIndex) {
-                    size_t opcodeAt = codeStart + (size_t)codeIndex;
-                    if (patchedBytes[opcodeAt] != 0x02 ||
-                        patchedBytes[opcodeAt + 1] != 0x9F ||
-                        patchedBytes[opcodeAt + 4] != 0x19 ||
-                        patchedBytes[opcodeAt + 5] != 0x04 ||
-                        patchedBytes[opcodeAt + 6] != 0xB6 ||
-                        patchedBytes[opcodeAt - 3] != 0xB6) {
-                        continue;
-                    }
-
-                    int branchOffset =
-                        ((int)(signed char)patchedBytes[opcodeAt + 2] << 8) |
-                        (int)patchedBytes[opcodeAt + 3];
-                    if (branchOffset <= 0) continue;
-
-                    patchedBytes[opcodeAt] = 0x57; // pop
-                    patchedBytes[opcodeAt + 1] = 0x00; // nop
-                    patchedBytes[opcodeAt + 2] = 0x00; // nop
-                    patchedBytes[opcodeAt + 3] = 0x00; // nop
-
-                    rebuildPatched = true;
-                    DebugLog("See Barriers patched bht rebuild renderType gate codeLength=%u offset=%u version=%u.%u",
-                        (unsigned int)codeLength,
-                        (unsigned int)codeIndex,
-                        (unsigned int)majorVersion,
-                        (unsigned int)minorVersion);
-                    break;
-                }
-
-                if (!rebuildPatched) {
-                    DebugLog("See Barriers failed to find bht rebuild renderType gate");
-                    return false;
-                }
-            }
-        }
-    }
-
-    if (!rebuildPatched) {
-        DebugLog("See Barriers failed to find bht.b(FFFLbhn;)V Code attribute");
-        return false;
-    }
-
-    return true;
-}
-
-bool EnsureBlockDamageDispatcherBytecode(JNIEnv* env) {
-    if (!g_seeBarriersOriginalDamageDispatcherBytes.empty() &&
-        !g_seeBarriersPatchedDamageDispatcherBytes.empty()) {
-        return true;
-    }
-
-    if (!LoadBlockDamageDispatcherClassBytes(env, g_seeBarriersOriginalDamageDispatcherBytes)) {
-        g_seeBarriersOriginalDamageDispatcherBytes.clear();
-        g_seeBarriersPatchedDamageDispatcherBytes.clear();
-        return false;
-    }
-
-    if (!PatchBlockRendererDispatcherSeeBarriers(
-        g_seeBarriersOriginalDamageDispatcherBytes,
-        g_seeBarriersPatchedDamageDispatcherBytes)) {
-        g_seeBarriersOriginalDamageDispatcherBytes.clear();
-        g_seeBarriersPatchedDamageDispatcherBytes.clear();
-        return false;
-    }
-
-    DebugLog("See Barriers loaded bgd.class bytes=%u", (unsigned int)g_seeBarriersOriginalDamageDispatcherBytes.size());
-    return true;
-}
-
-bool EnsureRenderChunkBytecode(JNIEnv* env) {
-    if (!g_seeBarriersOriginalRenderChunkBytes.empty() &&
-        !g_seeBarriersPatchedRenderChunkBytes.empty()) {
-        return true;
-    }
-
-    if (!LoadRenderChunkClassBytes(env, g_seeBarriersOriginalRenderChunkBytes)) {
-        g_seeBarriersOriginalRenderChunkBytes.clear();
-        g_seeBarriersPatchedRenderChunkBytes.clear();
-        return false;
-    }
-
-    if (!PatchRenderChunkSeeBarriers(
-        g_seeBarriersOriginalRenderChunkBytes,
-        g_seeBarriersPatchedRenderChunkBytes)) {
-        g_seeBarriersOriginalRenderChunkBytes.clear();
-        g_seeBarriersPatchedRenderChunkBytes.clear();
-        return false;
-    }
-
-    DebugLog("See Barriers loaded bht.class bytes=%u", (unsigned int)g_seeBarriersOriginalRenderChunkBytes.size());
-    return true;
-}
-
 void JNICALL SharedClassFileLoadHook(
     jvmtiEnv* jvmtiEnv,
     JNIEnv* env,
@@ -10106,7 +8925,6 @@ void JNICALL SharedClassFileLoadHook(
         env->IsSameObject(classBeingRedefined, g_runtimeClassCaptureTarget) == JNI_TRUE) {
         g_runtimeCapturedClassBytes.assign(classData, classData + (size_t)classDataLen);
     }
-
 }
 
 bool InitJvmtiRetransformSupport() {
@@ -10152,12 +8970,6 @@ bool InitJvmtiRetransformSupport() {
     }
 
     return true;
-}
-
-bool RetransformBarrierClass(JNIEnv* env, bool enabled) {
-    (void)env;
-    (void)enabled;
-    return false;
 }
 
 bool CaptureRuntimeClassBytes(JNIEnv* env, jclass targetClass, std::vector<unsigned char>& outBytes, const char* label) {
@@ -10232,12 +9044,6 @@ bool RedefineMutedVoiceS02PacketChat(JNIEnv* env, const std::vector<unsigned cha
     return RedefineJavaClass(env, g_mutedVoiceS02PacketClass, classBytes, label ? label : "S02PacketChat");
 }
 
-bool RedefineBarrierClass(JNIEnv* env, const std::vector<unsigned char>& classBytes) {
-    jclass barrierClass = nullptr;
-    if (!GetSeeBarriersBarrierClass(env, barrierClass)) return false;
-    return RedefineJavaClass(env, barrierClass, classBytes, "BlockBarrier");
-}
-
 jclass g_nameTagRenderPlayerClass = nullptr;
 jclass g_nameTagHelperClass = nullptr;
 jclass g_publicWinsScoreFormatHelperClass = nullptr;
@@ -10279,7 +9085,14 @@ jmethodID g_publicWinsNetworkInfoGetDisplayName = nullptr;
 jmethodID g_publicWinsNetworkInfoGetTeam = nullptr;
 jmethodID g_publicWinsComponentGetFormattedText = nullptr;
 jmethodID g_publicWinsTeamFormatPlayerName = nullptr;
+bool g_publicWinsNetworkInfoMethodsResolved = false;
+bool g_publicWinsComponentMethodResolved = false;
+bool g_publicWinsTeamFormatMethodResolved = false;
 jmethodID g_publicWinsBaseTeamFormatName = nullptr;
+jfieldID g_badlionEntityCachedFormattedName = nullptr;
+jfieldID g_badlionNetworkInfoRawName = nullptr;
+jfieldID g_badlionNetworkInfoRenderStringId = nullptr;
+jmethodID g_badlionMutableIntSetValue = nullptr;
 jmethodID g_publicWinsEntityGetName = nullptr;
 jmethodID g_publicWinsEntityGetDisplayName = nullptr;
 jmethodID g_publicWinsChatComponentGetFormattedText = nullptr;
@@ -10326,6 +9139,10 @@ std::string MakePublicWinsLabel(unsigned long long wins) {
     label.push_back(colour);
     label += "[" + digits + "]";
     return label;
+}
+
+std::string MakePublicNickedLabel() {
+    return "\xC2\xA7" "c[NICKED]";
 }
 
 struct MinecraftFormatState {
@@ -10408,20 +9225,57 @@ bool FindFormattedUsernameRange(const std::string& formatted, const std::string&
     return false;
 }
 
-std::string DecorateNameWithPublicWins(
+size_t FindTntTagPrefixStartBefore(
+    const std::string& formatted,
+    size_t usernameStart) {
+    std::string visible;
+    std::vector<size_t> sourceOffsets;
+    for (size_t i = 0; i < formatted.size() && i < usernameStart;) {
+        size_t codeLength = 0;
+        if (IsMinecraftFormatCodeAt(formatted, i, codeLength)) {
+            i += codeLength;
+            continue;
+        }
+        char ch = formatted[i];
+        visible.push_back((ch >= 'A' && ch <= 'Z')
+            ? (char)(ch - 'A' + 'a')
+            : ch);
+        sourceOffsets.push_back(i);
+        ++i;
+    }
+
+    const size_t tagAt = visible.rfind("[it]");
+    if (tagAt == std::string::npos || tagAt >= sourceOffsets.size()) {
+        return usernameStart;
+    }
+    return sourceOffsets[tagAt];
+}
+
+size_t GetPrefixInsertionPoint(
+    const std::string& formatted,
+    size_t usernameStart,
+    int placement) {
+    if (NormalizePrefixTntTagPlacement(placement) ==
+        PREFIX_TNT_TAG_PLACEMENT_BEFORE) {
+        return FindTntTagPrefixStartBefore(formatted, usernameStart);
+    }
+    return usernameStart;
+}
+
+std::string DecorateNameWithPublicLabel(
     const std::string& formatted,
     const std::string& username,
-    unsigned long long wins) {
+    const std::string& label) {
     size_t start = 0;
     size_t end = 0;
     if (!FindFormattedUsernameRange(formatted, username, start, end)) return formatted;
-    std::string label = MakePublicWinsLabel(wins);
-    // The scoreboard-team fallback may already have composed this label into
-    // the name before either render hook sees it. Keep both paths safe to use
-    // together without rendering the same wins value twice.
     if (formatted.find(label) != std::string::npos) return formatted;
+
     const bool suffix = g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX;
-    size_t insertAt = suffix ? end : start;
+    size_t insertAt = suffix
+        ? end
+        : GetPrefixInsertionPoint(
+            formatted, start, g_guiPublicWinsPrefixTntTagPlacement);
     MinecraftFormatState state = GetMinecraftFormatStateBefore(formatted, insertAt);
     const std::string separator = g_guiPublicWinsSpaceBetweenUsername ? " " : "";
     std::string insertion = suffix
@@ -10429,6 +9283,54 @@ std::string DecorateNameWithPublicWins(
         : label + RestoreMinecraftFormatState(state) + separator;
     std::string result = formatted;
     result.insert(insertAt, insertion);
+    return result;
+}
+
+std::string DecorateNameWithPublicWins(
+    const std::string& formatted,
+    const std::string& username,
+    unsigned long long wins) {
+    return DecorateNameWithPublicLabel(
+        formatted, username, MakePublicWinsLabel(wins));
+}
+
+std::string DecorateNameWithPublicResult(
+    const std::string& formatted,
+    const std::string& username,
+    PublicWinsCachedResult result,
+    unsigned long long wins) {
+    if (result == PUBLIC_WINS_CACHED_AVAILABLE) {
+        return DecorateNameWithPublicWins(formatted, username, wins);
+    }
+    if (result == PUBLIC_WINS_CACHED_NICKED) {
+        return DecorateNameWithPublicLabel(
+            formatted, username, MakePublicNickedLabel());
+    }
+    return formatted;
+}
+
+std::string DecorateNameWithNametagTimer(
+    const std::string& formatted,
+    const std::string& username,
+    double secondsRemaining) {
+    if (NormalizeTimerNametagPosition(g_guiTimerNametagPosition) ==
+        TIMER_NAMETAG_POSITION_SUFFIX) {
+        return formatted + MakeTimerSuffix(secondsRemaining);
+    }
+
+    size_t usernameStart = 0;
+    size_t usernameEnd = 0;
+    if (!FindFormattedUsernameRange(
+            formatted, username, usernameStart, usernameEnd)) {
+        return MakeTimerPrefix(secondsRemaining) + formatted;
+    }
+    const size_t insertAt = GetPrefixInsertionPoint(
+        formatted, usernameStart, g_guiTimerPrefixTntTagPlacement);
+    MinecraftFormatState state = GetMinecraftFormatStateBefore(formatted, insertAt);
+    std::string result = formatted;
+    result.insert(
+        insertAt,
+        MakeTimerPrefix(secondsRemaining) + RestoreMinecraftFormatState(state));
     return result;
 }
 
@@ -10440,13 +9342,14 @@ std::string DecorateApiTabTextWithPublicWins(const std::string& formatted, bool&
     }
     std::string bestName;
     unsigned long long bestWins = 0;
+    PublicWinsCachedResult bestResult = PUBLIC_WINS_CACHED_NONE;
     unsigned long long bestFetchedEpochMs = 0;
 
     {
         std::lock_guard<std::mutex> lock(g_publicWinsMutex);
         for (const auto& item : g_publicWinsCache) {
             const PublicWinsCacheEntry& entry = item.second;
-            if (!entry.hasDefinitiveResult || !entry.available ||
+            if (!entry.hasDefinitiveResult || (!entry.available && !entry.nicked) ||
                 !IsSafeMinecraftUsername(entry.apiDisplayName)) {
                 continue;
             }
@@ -10460,13 +9363,17 @@ std::string DecorateApiTabTextWithPublicWins(const std::string& formatted, bool&
 
             bestName = entry.apiDisplayName;
             bestWins = entry.wins;
+            bestResult = entry.available
+                ? PUBLIC_WINS_CACHED_AVAILABLE
+                : PUBLIC_WINS_CACHED_NICKED;
             bestFetchedEpochMs = entry.fetchedEpochMs;
         }
     }
 
     if (bestName.empty()) return formatted;
     matchedPlayer = true;
-    return DecorateNameWithPublicWins(formatted, bestName, bestWins);
+    return DecorateNameWithPublicResult(
+        formatted, bestName, bestResult, bestWins);
 }
 
 std::string GetScoreboardTeamName(jobject team) {
@@ -10593,8 +9500,9 @@ std::string MakePublicWinsLocalTeamName(const std::string& uuidValue) {
 
 std::string GetTeamSuffixWithoutTimer(const std::string& teamName, const std::string& currentSuffix) {
     auto timerIt = g_teamSuffixCache.find(teamName);
-    if (timerIt != g_teamSuffixCache.end() && !timerIt->second.appliedSuffix.empty() &&
-        EndsWith(currentSuffix, timerIt->second.appliedSuffix)) {
+    if (timerIt != g_teamSuffixCache.end() &&
+        !timerIt->second.appliedTimerSuffix.empty() &&
+        EndsWith(currentSuffix, timerIt->second.appliedTimerSuffix)) {
         return timerIt->second.baseSuffix;
     }
     return currentSuffix;
@@ -10733,9 +9641,10 @@ void ApplyPublicWinsToPlayerTeams(bool enablePublicWins) {
         seenLocalTeams.insert(localTeamName);
 
         unsigned long long wins = 0;
-        bool hasWins = GetPublicWinsCached(playerUuid, playerName, wins);
+        PublicWinsCachedResult cachedResult = GetPublicWinsCached(
+            playerUuid, playerName, wins);
         auto stateIt = g_publicWinsTeamFormatCache.find(localTeamName);
-        if (!hasWins) {
+        if (cachedResult == PUBLIC_WINS_CACHED_NONE) {
             if (stateIt != g_publicWinsTeamFormatCache.end()) {
                 ReleasePublicWinsLocalTeam(scoreboard, stateIt->second, true);
                 g_publicWinsTeamFormatCache.erase(stateIt);
@@ -10798,15 +9707,24 @@ void ApplyPublicWinsToPlayerTeams(bool enablePublicWins) {
 
         std::string desiredPrefix = compositionPrefix;
         std::string desiredBaseSuffix = stateIt->second.baseSuffix;
-        std::string label = MakePublicWinsLabel(wins);
+        std::string label = cachedResult == PUBLIC_WINS_CACHED_NICKED
+            ? MakePublicNickedLabel()
+            : MakePublicWinsLabel(wins);
         if (g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX) {
             desiredBaseSuffix = (g_guiPublicWinsSpaceBetweenUsername ? " " : "") + label + desiredBaseSuffix;
         }
         else {
-            MinecraftFormatState formatState = GetMinecraftFormatStateBefore(
-                compositionPrefix, compositionPrefix.size());
-            desiredPrefix = compositionPrefix + label + RestoreMinecraftFormatState(formatState) +
-                (g_guiPublicWinsSpaceBetweenUsername ? " " : "");
+            const std::string separator = g_guiPublicWinsSpaceBetweenUsername ? " " : "";
+            if (NormalizePrefixTntTagPlacement(g_guiPublicWinsPrefixTntTagPlacement) ==
+                PREFIX_TNT_TAG_PLACEMENT_BEFORE) {
+                desiredPrefix = label + "\xC2\xA7" "r" + separator + compositionPrefix;
+            }
+            else {
+                MinecraftFormatState formatState = GetMinecraftFormatStateBefore(
+                    compositionPrefix, compositionPrefix.size());
+                desiredPrefix = compositionPrefix + label +
+                    RestoreMinecraftFormatState(formatState) + separator;
+            }
         }
 
         bool timerOnNametag = g_guiTimerNametagEnabled && g_timerActive && !g_betweenRoundsTimerActive;
@@ -10815,8 +9733,12 @@ void ApplyPublicWinsToPlayerTeams(bool enablePublicWins) {
             std::string timerSuffix = MakeTimerSuffix(GetDecimalSeconds());
             desiredSuffix += timerSuffix;
             TeamSuffixState& timerState = g_teamSuffixCache[localTeamName];
+            timerState.basePrefix = desiredPrefix;
             timerState.baseSuffix = desiredBaseSuffix;
-            timerState.appliedSuffix = timerSuffix;
+            timerState.appliedPrefix = desiredPrefix;
+            timerState.appliedSuffix = desiredSuffix;
+            timerState.appliedTimerPrefix.clear();
+            timerState.appliedTimerSuffix = timerSuffix;
         }
         else {
             g_teamSuffixCache.erase(localTeamName);
@@ -10851,6 +9773,458 @@ void ApplyPublicWinsToPlayerTeams(bool enablePublicWins) {
         DebugLog("Public wins team formatting updated changed=%d labelled=%d players=%d position=%s",
             changedCount,
             labelledCount,
+            (int)playerCount,
+            g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX ? "suffix" : "prefix");
+    }
+}
+
+bool EnsureBadlionCachedFormattedNameField(jobject player) {
+    if (!g_env || !player) return false;
+    std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
+    if (g_badlionEntityCachedFormattedName) return true;
+
+    jclass playerClass = g_env->GetObjectClass(player);
+    if (!playerClass || g_env->ExceptionCheck()) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        if (playerClass) g_env->DeleteLocalRef(playerClass);
+        return false;
+    }
+    g_badlionEntityCachedFormattedName = GetFieldIDCompat(
+        g_env, playerClass, "cachedFormattedName", "Ljava/lang/String;");
+    g_env->DeleteLocalRef(playerClass);
+    if (!g_badlionEntityCachedFormattedName || g_env->ExceptionCheck()) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        g_badlionEntityCachedFormattedName = nullptr;
+        return false;
+    }
+    return true;
+}
+
+bool SetBadlionCachedFormattedName(jobject player, const std::string& value) {
+    if (!EnsureBadlionCachedFormattedNameField(player)) return false;
+    jstring formattedName = g_env->NewStringUTF(value.c_str());
+    if (!formattedName || g_env->ExceptionCheck()) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        if (formattedName) g_env->DeleteLocalRef(formattedName);
+        return false;
+    }
+    g_env->SetObjectField(player, g_badlionEntityCachedFormattedName, formattedName);
+    g_env->DeleteLocalRef(formattedName);
+    if (g_env->ExceptionCheck()) {
+        g_env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
+std::string GetCurrentScoreboardFormattedPlayerName(
+    jobject scoreboard,
+    const std::string& playerName) {
+    if (!g_env || !scoreboard || playerName.empty()) return playerName;
+    jobject team = GetPlayerScoreboardTeam(scoreboard, playerName);
+    if (!team) return playerName;
+
+    jmethodID formatMethod = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
+        if (!g_publicWinsBaseTeamFormatName) {
+            jclass baseTeamClass = FindClassLoose(g_env, "auq");
+            if (baseTeamClass && !g_env->ExceptionCheck()) {
+                g_publicWinsBaseTeamFormatName = GetMethodIDCompat(
+                    g_env, baseTeamClass, "d", "(Ljava/lang/String;)Ljava/lang/String;");
+                g_env->DeleteLocalRef(baseTeamClass);
+            }
+            if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        }
+        formatMethod = g_publicWinsBaseTeamFormatName;
+    }
+
+    std::string result = playerName;
+    if (formatMethod) {
+        jstring rawName = g_env->NewStringUTF(playerName.c_str());
+        jstring formattedName = rawName
+            ? (jstring)g_env->CallObjectMethod(team, formatMethod, rawName)
+            : nullptr;
+        if (!g_env->ExceptionCheck() && formattedName) {
+            result = JStringToUtf8(g_env, formattedName);
+        }
+        else if (g_env->ExceptionCheck()) {
+            g_env->ExceptionClear();
+        }
+        if (formattedName) g_env->DeleteLocalRef(formattedName);
+        if (rawName) g_env->DeleteLocalRef(rawName);
+    }
+    g_env->DeleteLocalRef(team);
+    return result.empty() ? playerName : result;
+}
+
+void RestorePublicWinsCachedPlayerName(
+    PublicWinsCachedPlayerNameState& state,
+    jobject scoreboard = nullptr) {
+    if (!g_env || !state.player) return;
+    std::string restoreName = state.baseFormattedName;
+    if (scoreboard) {
+        std::string playerName;
+        std::string playerUuid;
+        if (GetPlayerNameAndUuid(state.player, playerName, playerUuid) &&
+            IsLikelyPlayerUsername(playerName)) {
+            restoreName = GetCurrentScoreboardFormattedPlayerName(scoreboard, playerName);
+        }
+    }
+    SetBadlionCachedFormattedName(state.player, restoreName);
+    g_env->DeleteGlobalRef(state.player);
+    state.player = nullptr;
+}
+
+void ApplyPublicWinsToPlayerNameCaches(bool enablePublicWins) {
+    if (!g_env) {
+        g_publicWinsCachedPlayerNames.clear();
+        return;
+    }
+    if (!enablePublicWins) {
+        jobject restoreWorld = InitScoreboardJNI() ? GetWorldObject() : nullptr;
+        jobject restoreScoreboard = restoreWorld
+            ? GetScoreboardObjectFromWorld(restoreWorld)
+            : nullptr;
+        if (restoreWorld) g_env->DeleteLocalRef(restoreWorld);
+        int restoredCount = 0;
+        for (auto& item : g_publicWinsCachedPlayerNames) {
+            RestorePublicWinsCachedPlayerName(item.second, restoreScoreboard);
+            ++restoredCount;
+        }
+        if (restoreScoreboard) g_env->DeleteLocalRef(restoreScoreboard);
+        g_publicWinsCachedPlayerNames.clear();
+        if (restoredCount > 0) {
+            DebugLog("Public wins Badlion cached names restored count=%d", restoredCount);
+        }
+        return;
+    }
+    if (!InitScoreboardJNI()) return;
+
+    jobject world = GetWorldObject();
+    if (!world) return;
+    jobject scoreboard = GetScoreboardObjectFromWorld(world);
+    jobject players = g_env->GetObjectField(world, g_scoreboardJNI.fPlayerList);
+    g_env->DeleteLocalRef(world);
+    if (!scoreboard || !players || g_env->ExceptionCheck()) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        if (scoreboard) g_env->DeleteLocalRef(scoreboard);
+        if (players) g_env->DeleteLocalRef(players);
+        return;
+    }
+
+    jobjectArray playerArray = (jobjectArray)g_env->CallObjectMethod(
+        players, g_scoreboardJNI.mToArray);
+    g_env->DeleteLocalRef(players);
+    if (!playerArray || g_env->ExceptionCheck()) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        if (playerArray) g_env->DeleteLocalRef(playerArray);
+        g_env->DeleteLocalRef(scoreboard);
+        return;
+    }
+
+    int updatedCount = 0;
+    std::unordered_set<std::string> seenPlayers;
+    const jsize playerCount = g_env->GetArrayLength(playerArray);
+    for (jsize i = 0; i < playerCount; ++i) {
+        jobject player = g_env->GetObjectArrayElement(playerArray, i);
+        if (!player) continue;
+
+        std::string playerName;
+        std::string playerUuid;
+        if (!GetPlayerNameAndUuid(player, playerName, playerUuid) ||
+            !IsLikelyPlayerUsername(playerName) || !IsUuidLookupId(playerUuid)) {
+            g_env->DeleteLocalRef(player);
+            continue;
+        }
+
+        const std::string playerKey = NormalizePublicWinsUuid(playerUuid);
+        unsigned long long wins = 0;
+        PublicWinsCachedResult cachedResult = GetPublicWinsCached(
+            playerUuid, playerName, wins);
+        if (cachedResult == PUBLIC_WINS_CACHED_NONE) {
+            g_env->DeleteLocalRef(player);
+            continue;
+        }
+
+        std::string baseFormattedName = GetCurrentScoreboardFormattedPlayerName(
+            scoreboard, playerName);
+        std::string decoratedName = DecorateNameWithPublicResult(
+            baseFormattedName, playerName, cachedResult, wins);
+        if (decoratedName == baseFormattedName) {
+            g_env->DeleteLocalRef(player);
+            continue;
+        }
+
+        seenPlayers.insert(playerKey);
+        auto stateIt = g_publicWinsCachedPlayerNames.find(playerKey);
+        if (stateIt == g_publicWinsCachedPlayerNames.end()) {
+            PublicWinsCachedPlayerNameState state;
+            state.player = g_env->NewGlobalRef(player);
+            state.baseFormattedName = baseFormattedName;
+            if (state.player) {
+                stateIt = g_publicWinsCachedPlayerNames.emplace(
+                    playerKey, std::move(state)).first;
+            }
+        }
+        else {
+            if (!g_env->IsSameObject(stateIt->second.player, player)) {
+                RestorePublicWinsCachedPlayerName(stateIt->second, scoreboard);
+                stateIt->second.player = g_env->NewGlobalRef(player);
+            }
+            stateIt->second.baseFormattedName = baseFormattedName;
+        }
+
+        if (stateIt != g_publicWinsCachedPlayerNames.end() &&
+            stateIt->second.player &&
+            SetBadlionCachedFormattedName(player, decoratedName)) {
+            ++updatedCount;
+        }
+        g_env->DeleteLocalRef(player);
+    }
+
+    g_env->DeleteLocalRef(playerArray);
+
+    for (auto it = g_publicWinsCachedPlayerNames.begin();
+        it != g_publicWinsCachedPlayerNames.end();) {
+        if (seenPlayers.find(it->first) != seenPlayers.end()) {
+            ++it;
+            continue;
+        }
+        RestorePublicWinsCachedPlayerName(it->second, scoreboard);
+        it = g_publicWinsCachedPlayerNames.erase(it);
+    }
+    g_env->DeleteLocalRef(scoreboard);
+
+    static ULONGLONG lastLogMs = 0;
+    ULONGLONG nowMs = GetTickCount64();
+    if (updatedCount > 0 && (lastLogMs == 0 || nowMs - lastLogMs >= 2000)) {
+        lastLogMs = nowMs;
+        DebugLog(
+            "Public wins Badlion cached names updated=%d tracked=%d players=%d position=%s",
+            updatedCount,
+            (int)g_publicWinsCachedPlayerNames.size(),
+            (int)playerCount,
+            g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX ? "suffix" : "prefix");
+    }
+}
+
+bool EnsureBadlionTabNameCacheFields(jobject networkInfo) {
+    if (!g_env || !networkInfo) return false;
+    std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
+    if (g_badlionNetworkInfoRawName) return true;
+
+    jclass infoClass = g_env->GetObjectClass(networkInfo);
+    if (!infoClass || g_env->ExceptionCheck()) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        if (infoClass) g_env->DeleteLocalRef(infoClass);
+        return false;
+    }
+    g_badlionNetworkInfoRawName = GetFieldIDCompat(
+        g_env, infoClass, "rawName", "Ljava/lang/String;");
+    if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+    g_badlionNetworkInfoRenderStringId = GetFieldIDCompat(
+        g_env, infoClass, "renderStringId",
+        "Lorg/apache/commons/lang3/mutable/MutableInt;");
+    if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+    g_env->DeleteLocalRef(infoClass);
+    return g_badlionNetworkInfoRawName != nullptr;
+}
+
+void ResetBadlionTabRenderStringId(jobject networkInfo) {
+    if (!g_env || !networkInfo || !g_badlionNetworkInfoRenderStringId) return;
+    jobject renderStringId = g_env->GetObjectField(
+        networkInfo, g_badlionNetworkInfoRenderStringId);
+    if (!renderStringId || g_env->ExceptionCheck()) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        if (renderStringId) g_env->DeleteLocalRef(renderStringId);
+        return;
+    }
+
+    if (!g_badlionMutableIntSetValue) {
+        jclass mutableIntClass = g_env->GetObjectClass(renderStringId);
+        if (mutableIntClass && !g_env->ExceptionCheck()) {
+            g_badlionMutableIntSetValue = GetMethodIDCompat(
+                g_env, mutableIntClass, "setValue", "(I)V");
+            g_env->DeleteLocalRef(mutableIntClass);
+        }
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+    }
+    if (g_badlionMutableIntSetValue) {
+        g_env->CallVoidMethod(renderStringId, g_badlionMutableIntSetValue, (jint)-1);
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+    }
+    g_env->DeleteLocalRef(renderStringId);
+}
+
+bool SetBadlionTabRawName(jobject networkInfo, const std::string& value) {
+    if (!EnsureBadlionTabNameCacheFields(networkInfo)) return false;
+
+    jstring currentName = (jstring)g_env->GetObjectField(
+        networkInfo, g_badlionNetworkInfoRawName);
+    if (g_env->ExceptionCheck()) {
+        g_env->ExceptionClear();
+        if (currentName) g_env->DeleteLocalRef(currentName);
+        currentName = nullptr;
+    }
+    const bool alreadySet = currentName && JStringToUtf8(g_env, currentName) == value;
+    if (currentName) g_env->DeleteLocalRef(currentName);
+    if (alreadySet) return true;
+
+    jstring patchedName = g_env->NewStringUTF(value.c_str());
+    if (!patchedName || g_env->ExceptionCheck()) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        if (patchedName) g_env->DeleteLocalRef(patchedName);
+        return false;
+    }
+    g_env->SetObjectField(networkInfo, g_badlionNetworkInfoRawName, patchedName);
+    g_env->DeleteLocalRef(patchedName);
+    if (g_env->ExceptionCheck()) {
+        g_env->ExceptionClear();
+        return false;
+    }
+    ResetBadlionTabRenderStringId(networkInfo);
+    return true;
+}
+
+void RestorePublicWinsCachedTabName(
+    PublicWinsCachedTabNameState& state,
+    jobject scoreboard = nullptr) {
+    if (!g_env || !state.networkInfo) return;
+    std::string restoreName = state.baseFormattedName;
+    if (scoreboard) {
+        std::string playerName;
+        std::string playerUuid;
+        if (GetNetworkPlayerInfoNameAndUuid(
+                state.networkInfo, playerName, playerUuid) &&
+            IsLikelyPlayerUsername(playerName)) {
+            restoreName = GetCurrentScoreboardFormattedPlayerName(
+                scoreboard, playerName);
+        }
+    }
+    SetBadlionTabRawName(state.networkInfo, restoreName);
+    g_env->DeleteGlobalRef(state.networkInfo);
+    state.networkInfo = nullptr;
+}
+
+void ApplyPublicWinsToTabNameCaches(bool enablePublicWins) {
+    if (!g_env) {
+        g_publicWinsCachedTabNames.clear();
+        return;
+    }
+
+    jobject world = InitScoreboardJNI() ? GetWorldObject() : nullptr;
+    jobject scoreboard = world ? GetScoreboardObjectFromWorld(world) : nullptr;
+    if (world) g_env->DeleteLocalRef(world);
+
+    if (!enablePublicWins) {
+        int restoredCount = 0;
+        for (auto& item : g_publicWinsCachedTabNames) {
+            RestorePublicWinsCachedTabName(item.second, scoreboard);
+            ++restoredCount;
+        }
+        if (scoreboard) g_env->DeleteLocalRef(scoreboard);
+        g_publicWinsCachedTabNames.clear();
+        if (restoredCount > 0) {
+            DebugLog("Public wins Badlion tab names restored count=%d", restoredCount);
+        }
+        return;
+    }
+    if (!scoreboard) return;
+
+    jobjectArray playerArray = GetNetworkPlayerInfoArray();
+    if (!playerArray || g_env->ExceptionCheck()) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        if (playerArray) g_env->DeleteLocalRef(playerArray);
+        g_env->DeleteLocalRef(scoreboard);
+        return;
+    }
+
+    int updatedCount = 0;
+    std::unordered_set<std::string> seenPlayers;
+    const jsize playerCount = g_env->GetArrayLength(playerArray);
+    for (jsize i = 0; i < playerCount; ++i) {
+        jobject networkInfo = g_env->GetObjectArrayElement(playerArray, i);
+        if (!networkInfo) continue;
+
+        std::string playerName;
+        std::string playerUuid;
+        if (!GetNetworkPlayerInfoNameAndUuid(
+                networkInfo, playerName, playerUuid) ||
+            !IsLikelyPlayerUsername(playerName) || !IsUuidLookupId(playerUuid)) {
+            g_env->DeleteLocalRef(networkInfo);
+            continue;
+        }
+
+        unsigned long long wins = 0;
+        PublicWinsCachedResult cachedResult = GetPublicWinsCached(
+            playerUuid, playerName, wins);
+        if (cachedResult == PUBLIC_WINS_CACHED_NONE) {
+            g_env->DeleteLocalRef(networkInfo);
+            continue;
+        }
+
+        // Prime Badlion's display-name dependency cache before replacing
+        // rawName. It regenerates rawName when the server changes this player's
+        // team; the next 100 ms update then reapplies wins to that live value.
+        GetVanillaTabDisplayName(g_env, networkInfo, playerName);
+        std::string baseFormattedName = GetCurrentScoreboardFormattedPlayerName(
+            scoreboard, playerName);
+        std::string decoratedName = DecorateNameWithPublicResult(
+            baseFormattedName, playerName, cachedResult, wins);
+        if (decoratedName == baseFormattedName) {
+            g_env->DeleteLocalRef(networkInfo);
+            continue;
+        }
+
+        const std::string playerKey = NormalizePublicWinsUuid(playerUuid);
+        seenPlayers.insert(playerKey);
+        auto stateIt = g_publicWinsCachedTabNames.find(playerKey);
+        if (stateIt == g_publicWinsCachedTabNames.end()) {
+            PublicWinsCachedTabNameState state;
+            state.networkInfo = g_env->NewGlobalRef(networkInfo);
+            state.baseFormattedName = baseFormattedName;
+            if (state.networkInfo) {
+                stateIt = g_publicWinsCachedTabNames.emplace(
+                    playerKey, std::move(state)).first;
+            }
+        }
+        else {
+            if (!g_env->IsSameObject(stateIt->second.networkInfo, networkInfo)) {
+                RestorePublicWinsCachedTabName(stateIt->second, scoreboard);
+                stateIt->second.networkInfo = g_env->NewGlobalRef(networkInfo);
+            }
+            stateIt->second.baseFormattedName = baseFormattedName;
+        }
+
+        if (stateIt != g_publicWinsCachedTabNames.end() &&
+            stateIt->second.networkInfo &&
+            SetBadlionTabRawName(networkInfo, decoratedName)) {
+            ++updatedCount;
+        }
+        g_env->DeleteLocalRef(networkInfo);
+    }
+    g_env->DeleteLocalRef(playerArray);
+
+    for (auto it = g_publicWinsCachedTabNames.begin();
+        it != g_publicWinsCachedTabNames.end();) {
+        if (seenPlayers.find(it->first) != seenPlayers.end()) {
+            ++it;
+            continue;
+        }
+        RestorePublicWinsCachedTabName(it->second, scoreboard);
+        it = g_publicWinsCachedTabNames.erase(it);
+    }
+    g_env->DeleteLocalRef(scoreboard);
+
+    static ULONGLONG lastLogMs = 0;
+    const ULONGLONG nowMs = GetTickCount64();
+    if (updatedCount > 0 && (lastLogMs == 0 || nowMs - lastLogMs >= 2000)) {
+        lastLogMs = nowMs;
+        DebugLog(
+            "Public wins Badlion tab names updated=%d tracked=%d players=%d position=%s",
+            updatedCount,
+            (int)g_publicWinsCachedTabNames.size(),
             (int)playerCount,
             g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX ? "suffix" : "prefix");
     }
@@ -11053,30 +10427,39 @@ PlayerIdentity GetNetworkInfoIdentityForHook(JNIEnv* env, jobject networkInfo) {
 
 std::string GetVanillaTabDisplayName(JNIEnv* env, jobject networkInfo, const std::string& profileName) {
     if (!env || !networkInfo) return profileName;
-    std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
+    jmethodID getDisplayNameMethod = nullptr;
+    jmethodID getPlayerNameMethod = nullptr;
+    jmethodID getTeamMethod = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
+        if (!g_publicWinsNetworkInfoMethodsResolved) {
+            jclass infoClass = env->GetObjectClass(networkInfo);
+            if (!infoClass || env->ExceptionCheck()) {
+                env->ExceptionClear();
+                if (infoClass) env->DeleteLocalRef(infoClass);
+                return profileName;
+            }
+            g_publicWinsNetworkInfoGetDisplayName = GetMethodIDCompat(env, infoClass, "k", "()Leu;");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            // getPlayerName is a Badlion extension. A failed Lunar lookup is
+            // expensive, so resolve its absence once instead of once per row.
+            if (!IsLunarNamedClient()) {
+                g_publicWinsNetworkInfoGetPlayerName = GetMethodIDCompat(
+                    env, infoClass, "getPlayerName", "()Ljava/lang/String;");
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            g_publicWinsNetworkInfoGetTeam = GetMethodIDCompat(env, infoClass, "i", "()Laul;");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(infoClass);
+            g_publicWinsNetworkInfoMethodsResolved = true;
+        }
+        getDisplayNameMethod = g_publicWinsNetworkInfoGetDisplayName;
+        getPlayerNameMethod = g_publicWinsNetworkInfoGetPlayerName;
+        getTeamMethod = g_publicWinsNetworkInfoGetTeam;
+    }
 
-    jclass infoClass = env->GetObjectClass(networkInfo);
-    if (!infoClass || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (infoClass) env->DeleteLocalRef(infoClass);
-        return profileName;
-    }
-    if (!g_publicWinsNetworkInfoGetDisplayName) {
-        g_publicWinsNetworkInfoGetDisplayName = GetMethodIDCompat(env, infoClass, "k", "()Leu;");
-        if (env->ExceptionCheck()) env->ExceptionClear();
-    }
-    if (!g_publicWinsNetworkInfoGetPlayerName) {
-        g_publicWinsNetworkInfoGetPlayerName = GetMethodIDCompat(env, infoClass, "getPlayerName", "()Ljava/lang/String;");
-        if (env->ExceptionCheck()) env->ExceptionClear();
-    }
-    if (!g_publicWinsNetworkInfoGetTeam) {
-        g_publicWinsNetworkInfoGetTeam = GetMethodIDCompat(env, infoClass, "i", "()Laul;");
-        if (env->ExceptionCheck()) env->ExceptionClear();
-    }
-    env->DeleteLocalRef(infoClass);
-
-    if (g_publicWinsNetworkInfoGetPlayerName) {
-        jstring badlionName = (jstring)env->CallObjectMethod(networkInfo, g_publicWinsNetworkInfoGetPlayerName);
+    if (getPlayerNameMethod) {
+        jstring badlionName = (jstring)env->CallObjectMethod(networkInfo, getPlayerNameMethod);
         if (!env->ExceptionCheck()) {
             std::string value = JStringToUtf8(env, badlionName);
             if (badlionName) env->DeleteLocalRef(badlionName);
@@ -11088,23 +10471,30 @@ std::string GetVanillaTabDisplayName(JNIEnv* env, jobject networkInfo, const std
         }
     }
 
-    if (g_publicWinsNetworkInfoGetDisplayName) {
-        jobject component = env->CallObjectMethod(networkInfo, g_publicWinsNetworkInfoGetDisplayName);
+    if (getDisplayNameMethod) {
+        jobject component = env->CallObjectMethod(networkInfo, getDisplayNameMethod);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
             component = nullptr;
         }
         if (component) {
-            if (!g_publicWinsComponentGetFormattedText) {
-                jclass componentClass = env->GetObjectClass(component);
-                if (componentClass && !env->ExceptionCheck()) {
-                    g_publicWinsComponentGetFormattedText = GetMethodIDCompat(env, componentClass, "d", "()Ljava/lang/String;");
-                    env->DeleteLocalRef(componentClass);
+            jmethodID getFormattedTextMethod = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
+                if (!g_publicWinsComponentMethodResolved) {
+                    jclass componentClass = env->GetObjectClass(component);
+                    if (componentClass && !env->ExceptionCheck()) {
+                        g_publicWinsComponentGetFormattedText = GetMethodIDCompat(
+                            env, componentClass, "d", "()Ljava/lang/String;");
+                        env->DeleteLocalRef(componentClass);
+                    }
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    g_publicWinsComponentMethodResolved = true;
                 }
-                if (env->ExceptionCheck()) env->ExceptionClear();
+                getFormattedTextMethod = g_publicWinsComponentGetFormattedText;
             }
-            if (g_publicWinsComponentGetFormattedText) {
-                jstring formatted = (jstring)env->CallObjectMethod(component, g_publicWinsComponentGetFormattedText);
+            if (getFormattedTextMethod) {
+                jstring formatted = (jstring)env->CallObjectMethod(component, getFormattedTextMethod);
                 if (!env->ExceptionCheck()) {
                     std::string value = JStringToUtf8(env, formatted);
                     if (!value.empty()) {
@@ -11120,33 +10510,35 @@ std::string GetVanillaTabDisplayName(JNIEnv* env, jobject networkInfo, const std
         }
     }
 
-    if (!g_publicWinsNetworkInfoGetTeam) return profileName;
-    jobject team = env->CallObjectMethod(networkInfo, g_publicWinsNetworkInfoGetTeam);
+    if (!getTeamMethod) return profileName;
+    jobject team = env->CallObjectMethod(networkInfo, getTeamMethod);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
         team = nullptr;
     }
-    jclass teamClass = FindClassLoose(env, "aul");
-    if (!teamClass || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (teamClass) env->DeleteLocalRef(teamClass);
-        if (team) env->DeleteLocalRef(team);
-        return profileName;
-    }
-    if (!g_publicWinsTeamFormatPlayerName) {
-        g_publicWinsTeamFormatPlayerName = GetStaticMethodIDCompat(env, teamClass, "a", "(Laul;Ljava/lang/String;)Ljava/lang/String;");
-        if (env->ExceptionCheck()) env->ExceptionClear();
+    jclass teamClass = nullptr;
+    jmethodID formatPlayerNameMethod = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_nameTagJniMutex);
+        teamClass = g_publicWinsScorePlayerTeamClass;
+        if (teamClass && !g_publicWinsTeamFormatMethodResolved) {
+            g_publicWinsTeamFormatPlayerName = GetStaticMethodIDCompat(
+                env, teamClass, "a", "(Laul;Ljava/lang/String;)Ljava/lang/String;");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            g_publicWinsTeamFormatMethodResolved = true;
+        }
+        formatPlayerNameMethod = g_publicWinsTeamFormatPlayerName;
     }
     std::string result = profileName;
-    if (g_publicWinsTeamFormatPlayerName) {
+    if (teamClass && formatPlayerNameMethod) {
         jstring nameString = env->NewStringUTF(profileName.c_str());
-        jstring formatted = (jstring)env->CallStaticObjectMethod(teamClass, g_publicWinsTeamFormatPlayerName, team, nameString);
+        jstring formatted = (jstring)env->CallStaticObjectMethod(
+            teamClass, formatPlayerNameMethod, team, nameString);
         if (!env->ExceptionCheck()) result = JStringToUtf8(env, formatted);
         else env->ExceptionClear();
         if (formatted) env->DeleteLocalRef(formatted);
         if (nameString) env->DeleteLocalRef(nameString);
     }
-    env->DeleteLocalRef(teamClass);
     if (team) env->DeleteLocalRef(team);
     return result.empty() ? profileName : result;
 }
@@ -11191,9 +10583,12 @@ jstring JNICALL NameTagHookDispatch(JNIEnv* env, jclass, jobject player, jstring
     if (publicWinsEnabled && hasIdentity) {
         QueuePublicWinsLookup(identity.uuid, identity.name);
         unsigned long long wins = 0;
-        if (GetPublicWinsCached(identity.uuid, identity.name, wins)) {
+        PublicWinsCachedResult cachedResult = GetPublicWinsCached(
+            identity.uuid, identity.name, wins);
+        if (cachedResult != PUBLIC_WINS_CACHED_NONE) {
             publicCacheHit = true;
-            result = DecorateNameWithPublicWins(result, identity.name, wins);
+            result = DecorateNameWithPublicResult(
+                result, identity.name, cachedResult, wins);
         }
     }
 
@@ -11223,9 +10618,12 @@ jstring JNICALL PublicWinsTabNameHookDispatch(JNIEnv* env, jclass, jobject netwo
         InterlockedCompareExchange(&g_hypixelTntTagGameActive, 0, 0) != 0 && IsUuidLookupId(identity.uuid)) {
         QueuePublicWinsLookup(identity.uuid, identity.name);
         unsigned long long wins = 0;
-        if (GetPublicWinsCached(identity.uuid, identity.name, wins)) {
+        PublicWinsCachedResult cachedResult = GetPublicWinsCached(
+            identity.uuid, identity.name, wins);
+        if (cachedResult != PUBLIC_WINS_CACHED_NONE) {
             cacheHit = true;
-            result = DecorateNameWithPublicWins(result, identity.name, wins);
+            result = DecorateNameWithPublicResult(
+                result, identity.name, cachedResult, wins);
         }
     }
 
@@ -11308,10 +10706,11 @@ jstring JNICALL PublicWinsScoreFormatHookDispatch(
     std::string playerName = JStringToUtf8(env, playerNameString);
     std::string formatted = JStringToUtf8(env, formattedName);
     unsigned long long wins = 0;
-    bool cacheHit = GetPublicWinsCachedByPlayerName(playerName, wins);
-    std::string result = cacheHit
-        ? DecorateNameWithPublicWins(formatted, playerName, wins)
-        : formatted;
+    PublicWinsCachedResult cachedResult = GetPublicWinsCachedByPlayerName(
+        playerName, wins);
+    bool cacheHit = cachedResult != PUBLIC_WINS_CACHED_NONE;
+    std::string result = DecorateNameWithPublicResult(
+        formatted, playerName, cachedResult, wins);
     bool changed = result != formatted;
     if (changed) InterlockedIncrement(&g_publicWinsDecorationCount);
     if (dispatchNumber <= 10 || (changed && dispatchNumber <= 40)) {
@@ -11398,10 +10797,11 @@ jstring JNICALL PublicWinsRenderedNameHookDispatch(JNIEnv* env, jclass, jobject 
 
     std::string formatted = JStringToUtf8(env, formattedName);
     unsigned long long wins = 0;
-    bool cacheHit = GetPublicWinsCachedByPlayerName(playerName, wins);
-    std::string result = cacheHit
-        ? DecorateNameWithPublicWins(formatted, playerName, wins)
-        : formatted;
+    PublicWinsCachedResult cachedResult = GetPublicWinsCachedByPlayerName(
+        playerName, wins);
+    bool cacheHit = cachedResult != PUBLIC_WINS_CACHED_NONE;
+    std::string result = DecorateNameWithPublicResult(
+        formatted, playerName, cachedResult, wins);
     bool changed = result != formatted;
     if (changed) InterlockedIncrement(&g_publicWinsDecorationCount);
     if (dispatchNumber <= 10 || (changed && dispatchNumber <= 40)) {
@@ -11500,13 +10900,9 @@ jstring JNICALL LunarRenderedComponentHookDispatch(
 
     const double remaining = GetDecimalSeconds();
     std::string result = JStringToUtf8(env, formattedName);
-    if (NormalizeTimerNametagPosition(g_guiTimerNametagPosition) ==
-        TIMER_NAMETAG_POSITION_PREFIX) {
-        result = MakeTimerPrefix(remaining) + result;
-    }
-    else {
-        result += MakeTimerSuffix(remaining);
-    }
+    PlayerIdentity identity = GetPlayerIdentityForHook(env, entity);
+    result = DecorateNameWithNametagTimer(
+        result, identity.name, remaining);
     jstring patchedName = env->NewStringUTF(result.c_str());
     if (!patchedName || env->ExceptionCheck()) {
         if (env->ExceptionCheck()) env->ExceptionClear();
@@ -11612,6 +11008,11 @@ jobject AppendLunarAdventureComponent(JNIEnv* env, jobject base, jobject child) 
         return nullptr;
     }
     return result;
+}
+
+std::string RestoreMinecraftFormatStateAtEnd(const std::string& value) {
+    return RestoreMinecraftFormatState(
+        GetMinecraftFormatStateBefore(value, value.size()));
 }
 
 jobject JNICALL LunarAdventureNameHookDispatch(
@@ -12466,202 +11867,6 @@ bool AdjustNameTagLocalVariableTable(std::vector<unsigned char>& payload, uint16
     return true;
 }
 
-bool PatchPublicWinsApiTabRendererMethod(
-    const std::vector<unsigned char>& originalBytes,
-    std::vector<unsigned char>& patchedBytes) {
-    patchedBytes = originalBytes;
-
-    size_t cpOffset = 0;
-    uint16_t constantPoolCount = 0;
-    std::vector<std::string> utf8Constants;
-    if (!ReadClassConstantPoolUtf8(patchedBytes, cpOffset, constantPoolCount, utf8Constants) ||
-        constantPoolCount > 65520) {
-        DebugLog("Public wins API tab hook invalid apj.class constant pool");
-        return false;
-    }
-
-    std::vector<unsigned char> cpAdditions;
-    uint16_t nextIndex = constantPoolCount;
-    uint16_t helperNameUtf8 = AppendClassUtf8Cp(cpAdditions, nextIndex, "TntTagNameDisplayHookV2");
-    uint16_t helperClass = AppendClassClassCp(cpAdditions, nextIndex, helperNameUtf8);
-    uint16_t dispatchNameUtf8 = AppendClassUtf8Cp(cpAdditions, nextIndex, "c");
-    uint16_t dispatchDescUtf8 = AppendClassUtf8Cp(
-        cpAdditions, nextIndex, "(Ljava/lang/String;)Ljava/lang/String;");
-    uint16_t dispatchNameAndType = AppendClassNameAndTypeCp(
-        cpAdditions, nextIndex, dispatchNameUtf8, dispatchDescUtf8);
-    uint16_t dispatchMethodRef = AppendClassMethodRefCp(
-        cpAdditions, nextIndex, helperClass, dispatchNameAndType);
-
-    patchedBytes.insert(patchedBytes.begin() + (ptrdiff_t)cpOffset, cpAdditions.begin(), cpAdditions.end());
-    if (!WriteClassU2At(patchedBytes, 8, nextIndex)) return false;
-
-    size_t offset = 0;
-    if (!ReadClassConstantPoolUtf8(patchedBytes, offset, constantPoolCount, utf8Constants) ||
-        !AdvanceClassBytes(patchedBytes, offset, 6)) {
-        return false;
-    }
-
-    uint16_t interfacesCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, interfacesCount) ||
-        !AdvanceClassBytes(patchedBytes, offset, (size_t)interfacesCount * 2)) {
-        return false;
-    }
-
-    uint16_t fieldsCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, fieldsCount)) return false;
-    for (uint16_t i = 0; i < fieldsCount; ++i) {
-        if (!SkipClassMemberInfo(patchedBytes, offset)) return false;
-    }
-
-    uint16_t methodsCount = 0;
-    if (!ReadClassU2(patchedBytes, offset, methodsCount)) return false;
-    for (uint16_t i = 0; i < methodsCount; ++i) {
-        uint16_t accessFlags = 0;
-        uint16_t nameIndex = 0;
-        uint16_t descriptorIndex = 0;
-        uint16_t attributesCount = 0;
-        if (!ReadClassU2(patchedBytes, offset, accessFlags) ||
-            !ReadClassU2(patchedBytes, offset, nameIndex) ||
-            !ReadClassU2(patchedBytes, offset, descriptorIndex) ||
-            !ReadClassU2(patchedBytes, offset, attributesCount)) {
-            return false;
-        }
-
-        const std::string methodName =
-            nameIndex < utf8Constants.size() ? utf8Constants[(size_t)nameIndex] : std::string();
-        const std::string descriptor =
-            descriptorIndex < utf8Constants.size() ? utf8Constants[(size_t)descriptorIndex] : std::string();
-
-        for (uint16_t attr = 0; attr < attributesCount; ++attr) {
-            uint16_t attributeNameIndex = 0;
-            uint32_t attributeLength = 0;
-            if (!ReadClassU2(patchedBytes, offset, attributeNameIndex)) return false;
-            size_t attributeLengthOffset = offset;
-            if (!ReadClassU4(patchedBytes, offset, attributeLength)) return false;
-
-            size_t attributeStart = offset;
-            if (!AdvanceClassBytes(patchedBytes, offset, (size_t)attributeLength)) return false;
-            size_t attributeEnd = offset;
-            const std::string attributeName = attributeNameIndex < utf8Constants.size()
-                ? utf8Constants[(size_t)attributeNameIndex] : std::string();
-
-            if (methodName != "a" || descriptor != "(Ljava/lang/String;FFZZ)V" ||
-                attributeName != "Code") {
-                continue;
-            }
-
-            size_t codeOffset = attributeStart;
-            uint16_t oldMaxStack = 0;
-            uint16_t oldMaxLocals = 0;
-            uint32_t oldCodeLength = 0;
-            if (!ReadClassU2(patchedBytes, codeOffset, oldMaxStack) ||
-                !ReadClassU2(patchedBytes, codeOffset, oldMaxLocals) ||
-                !ReadClassU4(patchedBytes, codeOffset, oldCodeLength) ||
-                codeOffset + oldCodeLength > attributeEnd) {
-                DebugLog("Public wins API tab hook unsupported apj draw Code attribute");
-                return false;
-            }
-
-            size_t oldCodeStart = codeOffset;
-            size_t oldCodeEnd = oldCodeStart + oldCodeLength;
-            size_t exceptionOffset = oldCodeEnd;
-            uint16_t exceptionCount = 0;
-            if (!ReadClassU2(patchedBytes, exceptionOffset, exceptionCount) ||
-                exceptionOffset + ((size_t)exceptionCount * 8) > attributeEnd) {
-                return false;
-            }
-            size_t exceptionTableStart = exceptionOffset;
-            exceptionOffset += (size_t)exceptionCount * 8;
-            uint16_t codeAttributeCount = 0;
-            if (!ReadClassU2(patchedBytes, exceptionOffset, codeAttributeCount)) return false;
-            size_t nestedAttributeStart = exceptionOffset;
-
-            std::vector<unsigned char> injected;
-            AppendClassU1(injected, 0x2B); // aload_1 display string
-            AppendClassU1(injected, 0xB8); AppendClassU2(injected, dispatchMethodRef); // invokestatic helper.c
-            AppendClassU1(injected, 0x4C); // astore_1
-            const uint16_t insertLen = (uint16_t)injected.size();
-
-            std::vector<unsigned char> codeAttribute;
-            AppendClassU2(codeAttribute, oldMaxStack < 1 ? 1 : oldMaxStack);
-            AppendClassU2(codeAttribute, oldMaxLocals);
-            AppendClassU4(codeAttribute, oldCodeLength + (uint32_t)injected.size());
-            codeAttribute.insert(codeAttribute.end(), injected.begin(), injected.end());
-            codeAttribute.insert(codeAttribute.end(),
-                patchedBytes.begin() + (ptrdiff_t)oldCodeStart,
-                patchedBytes.begin() + (ptrdiff_t)oldCodeEnd);
-
-            AppendClassU2(codeAttribute, exceptionCount);
-            size_t exceptionRead = exceptionTableStart;
-            for (uint16_t ex = 0; ex < exceptionCount; ++ex) {
-                uint16_t startPc = 0;
-                uint16_t endPc = 0;
-                uint16_t handlerPc = 0;
-                uint16_t catchType = 0;
-                if (!ReadClassU2(patchedBytes, exceptionRead, startPc) ||
-                    !ReadClassU2(patchedBytes, exceptionRead, endPc) ||
-                    !ReadClassU2(patchedBytes, exceptionRead, handlerPc) ||
-                    !ReadClassU2(patchedBytes, exceptionRead, catchType)) {
-                    return false;
-                }
-                AppendClassU2(codeAttribute, (uint16_t)(startPc + insertLen));
-                AppendClassU2(codeAttribute, (uint16_t)(endPc + insertLen));
-                AppendClassU2(codeAttribute, (uint16_t)(handlerPc + insertLen));
-                AppendClassU2(codeAttribute, catchType);
-            }
-
-            AppendClassU2(codeAttribute, codeAttributeCount);
-            size_t nestedOffset = nestedAttributeStart;
-            for (uint16_t nested = 0; nested < codeAttributeCount; ++nested) {
-                uint16_t nestedNameIndex = 0;
-                uint32_t nestedLength = 0;
-                if (!ReadClassU2(patchedBytes, nestedOffset, nestedNameIndex) ||
-                    !ReadClassU4(patchedBytes, nestedOffset, nestedLength) ||
-                    nestedOffset + nestedLength > attributeEnd) {
-                    return false;
-                }
-
-                std::vector<unsigned char> payload(
-                    patchedBytes.begin() + (ptrdiff_t)nestedOffset,
-                    patchedBytes.begin() + (ptrdiff_t)nestedOffset + (ptrdiff_t)nestedLength);
-                nestedOffset += nestedLength;
-                const std::string nestedName = nestedNameIndex < utf8Constants.size()
-                    ? utf8Constants[(size_t)nestedNameIndex] : std::string();
-                if (nestedName == "StackMapTable") {
-                    if (!AdjustNameTagStackMapTable(payload, insertLen)) return false;
-                }
-                else if (nestedName == "LineNumberTable") {
-                    if (!AdjustNameTagLineNumberTable(payload, insertLen)) return false;
-                }
-                else if (nestedName == "LocalVariableTable" || nestedName == "LocalVariableTypeTable") {
-                    if (!AdjustNameTagLocalVariableTable(payload, insertLen)) return false;
-                }
-
-                AppendClassU2(codeAttribute, nestedNameIndex);
-                AppendClassU4(codeAttribute, (uint32_t)payload.size());
-                codeAttribute.insert(codeAttribute.end(), payload.begin(), payload.end());
-            }
-
-            if (!WriteClassU4At(patchedBytes, attributeLengthOffset, (uint32_t)codeAttribute.size())) {
-                return false;
-            }
-            patchedBytes.erase(
-                patchedBytes.begin() + (ptrdiff_t)attributeStart,
-                patchedBytes.begin() + (ptrdiff_t)attributeEnd);
-            patchedBytes.insert(
-                patchedBytes.begin() + (ptrdiff_t)attributeStart,
-                codeAttribute.begin(), codeAttribute.end());
-
-            DebugLog("Public wins API tab hook patched apj draw oldCodeLength=%u insert=%u",
-                (unsigned int)oldCodeLength, (unsigned int)insertLen);
-            return true;
-        }
-    }
-
-    DebugLog("Public wins API tab hook failed to find apj.a(Ljava/lang/String;FFZZ)V");
-    return false;
-}
-
 bool PatchRenderPlayerNameTagMethod(const std::vector<unsigned char>& originalBytes, std::vector<unsigned char>& patchedBytes) {
     patchedBytes = originalBytes;
     const char* owner = "net/minecraft/client/renderer/entity/RenderPlayer";
@@ -12901,53 +12106,6 @@ void RestoreNameTagHook(JNIEnv* env) {
         g_nameTagHookPatched = false;
         DebugLog("Name display hook restored");
     }
-}
-
-bool EnsurePublicWinsApiTabHook(JNIEnv* env) {
-    if (!env) return false;
-    if (IsLunarNamedClient()) return true;
-    if (g_publicWinsApiTabHookPatched) return true;
-    if (g_publicWinsApiTabHookFailed) return false;
-    if (!EnsureNameTagHook(env) || !EnsureNameTagHelper(env)) {
-        g_publicWinsApiTabHookFailed = true;
-        return false;
-    }
-
-    // Badlion's Hypixel Server API renderer replaces the vanilla awh player
-    // list and draws its parsed strings through net.badlion.a.apj instead.
-    jclass rendererClass = FindClassLoose(env, "net/badlion/a/apj");
-    if (!rendererClass || env->ExceptionCheck()) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        if (rendererClass) env->DeleteLocalRef(rendererClass);
-        g_publicWinsApiTabHookFailed = true;
-        DebugLog("Public wins API tab hook failed finding net.badlion.a.apj");
-        return false;
-    }
-
-    g_publicWinsApiTabRendererClass = (jclass)env->NewGlobalRef(rendererClass);
-    env->DeleteLocalRef(rendererClass);
-    if (!g_publicWinsApiTabRendererClass || env->ExceptionCheck()) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        g_publicWinsApiTabHookFailed = true;
-        DebugLog("Public wins API tab hook failed global-ref apj");
-        return false;
-    }
-
-    if (!CaptureRuntimeClassBytes(env, g_publicWinsApiTabRendererClass,
-            g_publicWinsOriginalApiTabRendererBytes, "Badlion API tab renderer apj") ||
-        !PatchPublicWinsApiTabRendererMethod(
-            g_publicWinsOriginalApiTabRendererBytes, g_publicWinsPatchedApiTabRendererBytes) ||
-        !RedefineJavaClass(env, g_publicWinsApiTabRendererClass,
-            g_publicWinsPatchedApiTabRendererBytes, "Badlion API tab renderer Public wins")) {
-        g_publicWinsOriginalApiTabRendererBytes.clear();
-        g_publicWinsPatchedApiTabRendererBytes.clear();
-        g_publicWinsApiTabHookFailed = true;
-        return false;
-    }
-
-    g_publicWinsApiTabHookPatched = true;
-    DebugLog("Public wins API tab hook installed");
-    return true;
 }
 
 bool LoadPublicWinsTabOverlayClassBytes(JNIEnv* env, std::vector<unsigned char>& outBytes) {
@@ -13618,697 +12776,6 @@ void RestorePublicWinsTabNameHook(JNIEnv* env) {
     RestoreNameTagHook(env);
 }
 
-bool SetBlockDamageDispatcherPatch(JNIEnv* env, bool enabled) {
-    if (enabled == g_seeBarriersDamageDispatcherPatched) return true;
-    if (!EnsureBlockDamageDispatcherBytecode(env)) return false;
-    if (!g_seeBarriersBlockRendererDispatcherClass) return false;
-
-    const std::vector<unsigned char>& classBytes = enabled ?
-        g_seeBarriersPatchedDamageDispatcherBytes :
-        g_seeBarriersOriginalDamageDispatcherBytes;
-    if (!RedefineJavaClass(env, g_seeBarriersBlockRendererDispatcherClass, classBytes, "BlockRendererDispatcher")) {
-        return false;
-    }
-
-    g_seeBarriersDamageDispatcherPatched = enabled;
-    DebugLog("See Barriers damage overlay dispatcher patch applied=%d", enabled ? 1 : 0);
-    return true;
-}
-
-bool SetRenderChunkPatch(JNIEnv* env, bool enabled) {
-    if (enabled == g_seeBarriersRenderChunkPatched) return true;
-    if (!EnsureRenderChunkBytecode(env)) return false;
-
-    jclass renderChunkClass = nullptr;
-    if (!GetSeeBarriersRenderChunkClass(env, renderChunkClass)) return false;
-
-    const std::vector<unsigned char>& classBytes = enabled ?
-        g_seeBarriersPatchedRenderChunkBytes :
-        g_seeBarriersOriginalRenderChunkBytes;
-    if (!RedefineJavaClass(env, renderChunkClass, classBytes, "RenderChunk")) {
-        return false;
-    }
-
-    g_seeBarriersRenderChunkPatched = enabled;
-    DebugLog("See Barriers render chunk patch applied=%d", enabled ? 1 : 0);
-    return true;
-}
-
-bool EnsureSeeBarriersModelOverrideJNI(JNIEnv* env) {
-    if (g_seeBarriersModelOverrideInited) return true;
-    if (!env) return false;
-
-    if ((!g_slInited || g_slFailed) && !InitSnaplookJNI()) {
-        DebugLog("See Barriers model override missing Minecraft JNI");
-        return false;
-    }
-
-    jclass blockClassLocal = FindClassLoose(env, "afh");
-    jclass dispatcherClassLocal = FindClassLoose(env, "bgd");
-    jclass blockStateContainerClassLocal = FindClassLoose(env, "ama");
-    jclass modelShapesClassLocal = FindClassLoose(env, "bgc");
-    jclass mapClassLocal = FindClassLoose(env, "java/util/Map");
-    jclass bakedModelClassLocal = FindClassLoose(env, "boq");
-    jclass listClassLocal = FindClassLoose(env, "java/util/List");
-    if (!blockClassLocal || !dispatcherClassLocal || !blockStateContainerClassLocal ||
-        !modelShapesClassLocal || !mapClassLocal || !bakedModelClassLocal || !listClassLocal ||
-        env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (blockClassLocal) env->DeleteLocalRef(blockClassLocal);
-        if (dispatcherClassLocal) env->DeleteLocalRef(dispatcherClassLocal);
-        if (blockStateContainerClassLocal) env->DeleteLocalRef(blockStateContainerClassLocal);
-        if (modelShapesClassLocal) env->DeleteLocalRef(modelShapesClassLocal);
-        if (mapClassLocal) env->DeleteLocalRef(mapClassLocal);
-        if (bakedModelClassLocal) env->DeleteLocalRef(bakedModelClassLocal);
-        if (listClassLocal) env->DeleteLocalRef(listClassLocal);
-        DebugLog("See Barriers model override class lookup failed");
-        return false;
-    }
-
-    g_seeBarriersBlockClass = (jclass)env->NewGlobalRef(blockClassLocal);
-    g_seeBarriersBlockRendererDispatcherClass = (jclass)env->NewGlobalRef(dispatcherClassLocal);
-    g_seeBarriersBlockStateContainerClass = (jclass)env->NewGlobalRef(blockStateContainerClassLocal);
-    g_seeBarriersBlockModelShapesClass = (jclass)env->NewGlobalRef(modelShapesClassLocal);
-    g_seeBarriersMapClass = (jclass)env->NewGlobalRef(mapClassLocal);
-    g_seeBarriersBakedModelClass = (jclass)env->NewGlobalRef(bakedModelClassLocal);
-    g_seeBarriersListClass = (jclass)env->NewGlobalRef(listClassLocal);
-
-    env->DeleteLocalRef(blockClassLocal);
-    env->DeleteLocalRef(dispatcherClassLocal);
-    env->DeleteLocalRef(blockStateContainerClassLocal);
-    env->DeleteLocalRef(modelShapesClassLocal);
-    env->DeleteLocalRef(mapClassLocal);
-    env->DeleteLocalRef(bakedModelClassLocal);
-    env->DeleteLocalRef(listClassLocal);
-
-    if (!g_seeBarriersBlockClass || !g_seeBarriersBlockRendererDispatcherClass ||
-        !g_seeBarriersBlockStateContainerClass || !g_seeBarriersBlockModelShapesClass ||
-        !g_seeBarriersMapClass || !g_seeBarriersBakedModelClass || !g_seeBarriersListClass ||
-        env->ExceptionCheck()) {
-        env->ExceptionClear();
-        DebugLog("See Barriers model override global-ref failed");
-        return false;
-    }
-
-    auto lookupMethod = [env](jclass cls, const char* name, const char* sig, const char* label) -> jmethodID {
-        jmethodID id = GetMethodIDCompat(env, cls, name, sig);
-        if (!id || env->ExceptionCheck()) {
-            env->ExceptionClear();
-            DebugLog("See Barriers model override member lookup failed: %s", label);
-            return nullptr;
-        }
-        return id;
-    };
-
-    auto lookupStaticMethod = [env](jclass cls, const char* name, const char* sig, const char* label) -> jmethodID {
-        jmethodID id = GetStaticMethodIDCompat(env, cls, name, sig);
-        if (!id || env->ExceptionCheck()) {
-            env->ExceptionClear();
-            DebugLog("See Barriers model override member lookup failed: %s", label);
-            return nullptr;
-        }
-        return id;
-    };
-
-    auto lookupField = [env](jclass cls, const char* name, const char* sig, const char* label) -> jfieldID {
-        jfieldID id = GetFieldIDCompat(env, cls, name, sig);
-        if (!id || env->ExceptionCheck()) {
-            env->ExceptionClear();
-            DebugLog("See Barriers model override member lookup failed: %s", label);
-            return nullptr;
-        }
-        return id;
-    };
-
-    g_seeBarriersMinecraftGetBlockRendererDispatcher = lookupMethod(g_slMcClass, "ae", "()Lbgd;", "ave.ae()Lbgd;");
-    if (!g_seeBarriersMinecraftGetBlockRendererDispatcher) return false;
-
-    g_seeBarriersBlockRendererGetModelShapes = lookupMethod(g_seeBarriersBlockRendererDispatcherClass, "a", "()Lbgc;", "bgd.a()Lbgc;");
-    if (!g_seeBarriersBlockRendererGetModelShapes) return false;
-
-    g_seeBarriersBlockModelShapesGetModel = lookupMethod(g_seeBarriersBlockModelShapesClass, "b", "(Lalz;)Lboq;", "bgc.b(Lalz;)Lboq;");
-    if (!g_seeBarriersBlockModelShapesGetModel) return false;
-
-    g_seeBarriersBlockModelShapesModelMap = lookupField(g_seeBarriersBlockModelShapesClass, "a", "Ljava/util/Map;", "bgc.a Ljava/util/Map;");
-    if (!g_seeBarriersBlockModelShapesModelMap) return false;
-
-    g_seeBarriersBlockGetById = lookupStaticMethod(g_seeBarriersBlockClass, "c", "(I)Lafh;", "afh.c(I)Lafh;");
-    if (!g_seeBarriersBlockGetById) return false;
-
-    g_seeBarriersBlockGetStateContainer = lookupMethod(g_seeBarriersBlockClass, "P", "()Lama;", "afh.P()Lama;");
-    if (!g_seeBarriersBlockGetStateContainer) return false;
-
-    g_seeBarriersBlockGetDefaultState = lookupMethod(g_seeBarriersBlockClass, "Q", "()Lalz;", "afh.Q()Lalz;");
-    if (!g_seeBarriersBlockGetDefaultState) return false;
-
-    g_seeBarriersBlockStateContainerGetValidStates = lookupMethod(g_seeBarriersBlockStateContainerClass, "a", "()Lcom/google/common/collect/ImmutableList;", "ama.a()LImmutableList;");
-    if (!g_seeBarriersBlockStateContainerGetValidStates) return false;
-
-    g_seeBarriersBakedModelGetGeneralQuads = lookupMethod(g_seeBarriersBakedModelClass, "a", "()Ljava/util/List;", "boq.a()Ljava/util/List;");
-    if (!g_seeBarriersBakedModelGetGeneralQuads) return false;
-
-    g_seeBarriersBakedModelGetFaceQuads = lookupMethod(g_seeBarriersBakedModelClass, "a", "(Lcq;)Ljava/util/List;", "boq.a(Lcq;)Ljava/util/List;");
-    if (!g_seeBarriersBakedModelGetFaceQuads) return false;
-
-    g_seeBarriersListSize = lookupMethod(g_seeBarriersListClass, "size", "()I", "List.size()");
-    if (!g_seeBarriersListSize) return false;
-
-    g_seeBarriersListGet = lookupMethod(g_seeBarriersListClass, "get", "(I)Ljava/lang/Object;", "List.get(I)");
-    if (!g_seeBarriersListGet) return false;
-
-    g_seeBarriersMapPut = lookupMethod(g_seeBarriersMapClass, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", "Map.put(Object,Object)");
-    if (!g_seeBarriersMapPut) return false;
-
-    g_seeBarriersMapRemove = lookupMethod(g_seeBarriersMapClass, "remove", "(Ljava/lang/Object;)Ljava/lang/Object;", "Map.remove(Object)");
-    if (!g_seeBarriersMapRemove) return false;
-
-    g_seeBarriersModelOverrideInited = true;
-    return true;
-}
-
-jobject GetSeeBarriersBlockById(JNIEnv* env, int blockId) {
-    if (!env || !g_seeBarriersBlockGetById) return nullptr;
-    jobject block = env->CallStaticObjectMethod(g_seeBarriersBlockClass, g_seeBarriersBlockGetById, (jint)blockId);
-    if (!block || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (block) env->DeleteLocalRef(block);
-        return nullptr;
-    }
-    return block;
-}
-
-jobject GetSeeBarriersDefaultState(JNIEnv* env, jobject block) {
-    if (!env || !block || !g_seeBarriersBlockGetDefaultState) return nullptr;
-    jobject state = env->CallObjectMethod(block, g_seeBarriersBlockGetDefaultState);
-    if (!state || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (state) env->DeleteLocalRef(state);
-        return nullptr;
-    }
-    return state;
-}
-
-jobject GetSeeBarriersModelShapes(JNIEnv* env) {
-    if (!env || !g_slMcClass || !g_slGetMC || !g_seeBarriersMinecraftGetBlockRendererDispatcher ||
-        !g_seeBarriersBlockRendererGetModelShapes) {
-        return nullptr;
-    }
-
-    jobject mc = env->CallStaticObjectMethod(g_slMcClass, g_slGetMC);
-    if (!mc || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (mc) env->DeleteLocalRef(mc);
-        return nullptr;
-    }
-
-    jobject dispatcher = env->CallObjectMethod(mc, g_seeBarriersMinecraftGetBlockRendererDispatcher);
-    env->DeleteLocalRef(mc);
-    if (!dispatcher || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (dispatcher) env->DeleteLocalRef(dispatcher);
-        return nullptr;
-    }
-
-    jobject modelShapes = env->CallObjectMethod(dispatcher, g_seeBarriersBlockRendererGetModelShapes);
-    env->DeleteLocalRef(dispatcher);
-    if (!modelShapes || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (modelShapes) env->DeleteLocalRef(modelShapes);
-        return nullptr;
-    }
-
-    return modelShapes;
-}
-
-jobject GetSeeBarriersBakedModelForBlockId(JNIEnv* env, jobject modelShapes, int blockId) {
-    jobject block = GetSeeBarriersBlockById(env, blockId);
-    if (!block) return nullptr;
-
-    jobject state = GetSeeBarriersDefaultState(env, block);
-    env->DeleteLocalRef(block);
-    if (!state) return nullptr;
-
-    jobject model = env->CallObjectMethod(modelShapes, g_seeBarriersBlockModelShapesGetModel, state);
-    env->DeleteLocalRef(state);
-    if (!model || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (model) env->DeleteLocalRef(model);
-        return nullptr;
-    }
-
-    return model;
-}
-
-struct SeeBarriersModelQuadCounts {
-    int generalQuads = -1;
-    int faceQuads = -1;
-};
-
-int GetSeeBarriersListSize(JNIEnv* env, jobject list) {
-    if (!env || !list || !g_seeBarriersListSize) return -1;
-
-    jint size = env->CallIntMethod(list, g_seeBarriersListSize);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return -1;
-    }
-
-    return (int)size;
-}
-
-void ClearSeeBarriersStoredModelOverrides(JNIEnv* env) {
-    if (!env) return;
-
-    for (auto& entry : g_seeBarriersStoredModelOverrides) {
-        if (entry.state) {
-            env->DeleteGlobalRef(entry.state);
-            entry.state = nullptr;
-        }
-        if (entry.originalModel) {
-            env->DeleteGlobalRef(entry.originalModel);
-            entry.originalModel = nullptr;
-        }
-    }
-    g_seeBarriersStoredModelOverrides.clear();
-}
-
-bool CollectSeeBarriersBarrierStates(JNIEnv* env, jobject barrierBlock, std::vector<jobject>& outStates) {
-    outStates.clear();
-    if (!env || !barrierBlock) return false;
-
-    if (g_seeBarriersBlockGetStateContainer && g_seeBarriersBlockStateContainerGetValidStates &&
-        g_seeBarriersListSize && g_seeBarriersListGet) {
-        jobject stateContainer = env->CallObjectMethod(barrierBlock, g_seeBarriersBlockGetStateContainer);
-        if (stateContainer && !env->ExceptionCheck()) {
-            jobject validStates = env->CallObjectMethod(stateContainer, g_seeBarriersBlockStateContainerGetValidStates);
-            if (validStates && !env->ExceptionCheck()) {
-                int stateCount = GetSeeBarriersListSize(env, validStates);
-                if (stateCount > 0) {
-                    outStates.reserve((size_t)stateCount);
-                    for (int i = 0; i < stateCount; ++i) {
-                        jobject state = env->CallObjectMethod(validStates, g_seeBarriersListGet, (jint)i);
-                        if (!state || env->ExceptionCheck()) {
-                            env->ExceptionClear();
-                            if (state) env->DeleteLocalRef(state);
-                            continue;
-                        }
-                        outStates.push_back(state);
-                    }
-                }
-            }
-            else if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-            }
-
-            if (validStates) env->DeleteLocalRef(validStates);
-            env->DeleteLocalRef(stateContainer);
-        }
-        else {
-            env->ExceptionClear();
-            if (stateContainer) env->DeleteLocalRef(stateContainer);
-        }
-    }
-
-    if (!outStates.empty()) return true;
-
-    jobject defaultState = GetSeeBarriersDefaultState(env, barrierBlock);
-    if (!defaultState) return false;
-    outStates.push_back(defaultState);
-    return true;
-}
-
-bool RestoreSeeBarriersStoredModelOverrides(JNIEnv* env, jobject modelMap) {
-    if (!env || !modelMap) return false;
-
-    bool ok = true;
-    for (const auto& entry : g_seeBarriersStoredModelOverrides) {
-        jobject previousModel = nullptr;
-        if (entry.hadOriginalModel && entry.originalModel) {
-            previousModel = env->CallObjectMethod(modelMap, g_seeBarriersMapPut, entry.state, entry.originalModel);
-        }
-        else {
-            previousModel = env->CallObjectMethod(modelMap, g_seeBarriersMapRemove, entry.state);
-        }
-
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            ok = false;
-        }
-
-        if (previousModel) env->DeleteLocalRef(previousModel);
-    }
-
-    return ok;
-}
-
-bool GetSeeBarriersModelQuadCounts(JNIEnv* env, jobject model, SeeBarriersModelQuadCounts& outCounts) {
-    outCounts = {};
-    if (!env || !model || !g_seeBarriersBakedModelGetGeneralQuads ||
-        !g_seeBarriersBakedModelGetFaceQuads || !g_seeBarriersDirectionValues) {
-        return false;
-    }
-
-    jobject generalQuads = env->CallObjectMethod(model, g_seeBarriersBakedModelGetGeneralQuads);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (generalQuads) env->DeleteLocalRef(generalQuads);
-        return false;
-    }
-
-    outCounts.generalQuads = generalQuads ? GetSeeBarriersListSize(env, generalQuads) : 0;
-    if (generalQuads) env->DeleteLocalRef(generalQuads);
-    if (outCounts.generalQuads < 0) return false;
-
-    jobjectArray directions = (jobjectArray)env->CallStaticObjectMethod(g_seeBarriersDirectionClass, g_seeBarriersDirectionValues);
-    if (!directions || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (directions) env->DeleteLocalRef(directions);
-        return false;
-    }
-
-    jsize directionCount = env->GetArrayLength(directions);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(directions);
-        return false;
-    }
-
-    int faceQuads = 0;
-    for (jsize i = 0; i < directionCount; ++i) {
-        jobject direction = env->GetObjectArrayElement(directions, i);
-        if (!direction || env->ExceptionCheck()) {
-            env->ExceptionClear();
-            if (direction) env->DeleteLocalRef(direction);
-            continue;
-        }
-
-        jobject quads = env->CallObjectMethod(model, g_seeBarriersBakedModelGetFaceQuads, direction);
-        env->DeleteLocalRef(direction);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            if (quads) env->DeleteLocalRef(quads);
-            env->DeleteLocalRef(directions);
-            return false;
-        }
-
-        int size = quads ? GetSeeBarriersListSize(env, quads) : 0;
-        if (quads) env->DeleteLocalRef(quads);
-        if (size < 0) {
-            env->DeleteLocalRef(directions);
-            return false;
-        }
-        faceQuads += size;
-    }
-
-    env->DeleteLocalRef(directions);
-    outCounts.faceQuads = faceQuads;
-    return true;
-}
-
-std::string DescribeSeeBarriersJavaObject(JNIEnv* env, jobject value) {
-    if (!env || !value || !g_seeBarriersObjectToString) return "null";
-
-    jstring text = (jstring)env->CallObjectMethod(value, g_seeBarriersObjectToString);
-    if (!text || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (text) env->DeleteLocalRef(text);
-        return "unknown";
-    }
-
-    std::string result = JStringToUtf8(env, text);
-    env->DeleteLocalRef(text);
-    return result.empty() ? "unknown" : result;
-}
-
-int QuerySeeBarriersRuntimeRenderType(JNIEnv* env) {
-    if (!env) return -999;
-
-    jobject barrierBlock = GetSeeBarriersBlockById(env, 166);
-    if (!barrierBlock) return -999;
-
-    jmethodID renderTypeMethod = nullptr;
-    jclass barrierClass = nullptr;
-    if (GetSeeBarriersBarrierClass(env, barrierClass)) {
-        renderTypeMethod = GetMethodIDCompat(env, barrierClass, "b", "()I");
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            renderTypeMethod = nullptr;
-        }
-    }
-    if (!renderTypeMethod) renderTypeMethod = g_seeBarriersBlockGetRenderType;
-
-    if (!renderTypeMethod) {
-        env->DeleteLocalRef(barrierBlock);
-        return -999;
-    }
-
-    jint renderType = env->CallIntMethod(barrierBlock, renderTypeMethod);
-    env->DeleteLocalRef(barrierBlock);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return -999;
-    }
-
-    return (int)renderType;
-}
-
-void LogSeeBarriersRuntimeState(JNIEnv* env, const char* phase) {
-    if (!env || !phase) return;
-    if (!EnsureSeeBarriersModelOverrideJNI(env)) {
-        DebugLog("See Barriers runtime verify skipped phase=%s reason=model JNI unavailable", phase);
-        return;
-    }
-
-    jobject barrierBlock = GetSeeBarriersBlockById(env, 166);
-    if (!barrierBlock) {
-        DebugLog("See Barriers runtime verify failed phase=%s reason=no barrier block", phase);
-        return;
-    }
-
-    int renderType = QuerySeeBarriersRuntimeRenderType(env);
-
-    jobject renderLayer = env->CallObjectMethod(barrierBlock, g_seeBarriersBlockGetRenderLayer);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (renderLayer) env->DeleteLocalRef(renderLayer);
-        renderLayer = nullptr;
-    }
-
-    int layerOrdinal = -1;
-    std::string layerName = "null";
-    if (renderLayer) {
-        layerName = DescribeSeeBarriersJavaObject(env, renderLayer);
-        if (g_seeBarriersEnumOrdinal) {
-            jint ordinal = env->CallIntMethod(renderLayer, g_seeBarriersEnumOrdinal);
-            if (!env->ExceptionCheck()) layerOrdinal = (int)ordinal;
-            else env->ExceptionClear();
-        }
-        env->DeleteLocalRef(renderLayer);
-    }
-
-    env->DeleteLocalRef(barrierBlock);
-    DebugLog("See Barriers runtime renderType=%d layerOrdinal=%d layer=%s phase=%s",
-        renderType,
-        layerOrdinal,
-        layerName.c_str(),
-        phase);
-}
-
-jobject ResolveSeeBarriersVisibleModel(JNIEnv* env, jobject modelShapes) {
-    if (!env || !modelShapes) return nullptr;
-
-    jobject model = GetSeeBarriersBakedModelForBlockId(env, modelShapes, kSeeBarriersDirtBlockId);
-    if (!model) {
-        DebugLog("See Barriers dirt model lookup failed id=%d", kSeeBarriersDirtBlockId);
-        return nullptr;
-    }
-
-    SeeBarriersModelQuadCounts counts = {};
-    if (GetSeeBarriersModelQuadCounts(env, model, counts)) {
-        DebugLog("See Barriers selected dirt model id=%d generalQuads=%d faceQuads=%d",
-            kSeeBarriersDirtBlockId,
-            counts.generalQuads,
-            counts.faceQuads);
-    }
-    else {
-        DebugLog("See Barriers selected dirt model id=%d quad count failed", kSeeBarriersDirtBlockId);
-    }
-
-    return model;
-}
-
-bool SetSeeBarriersModelOverride(JNIEnv* env, bool enabled) {
-    if (!env) return false;
-    if (enabled == g_seeBarriersBarrierModelOverridden) return true;
-    if (!EnsureSeeBarriersModelOverrideJNI(env)) return false;
-
-    jobject modelShapes = GetSeeBarriersModelShapes(env);
-    if (!modelShapes) {
-        DebugLog("See Barriers model override failed: no BlockModelShapes");
-        return false;
-    }
-
-    jobject modelMap = env->GetObjectField(modelShapes, g_seeBarriersBlockModelShapesModelMap);
-    if (!modelMap || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (modelMap) env->DeleteLocalRef(modelMap);
-        env->DeleteLocalRef(modelShapes);
-        DebugLog("See Barriers model override failed: no baked model map");
-        return false;
-    }
-
-    jobject barrierBlock = GetSeeBarriersBlockById(env, 166);
-    if (!barrierBlock) {
-        env->DeleteLocalRef(modelMap);
-        env->DeleteLocalRef(modelShapes);
-        DebugLog("See Barriers model override failed: no barrier block");
-        return false;
-    }
-
-    bool ok = true;
-    if (enabled) {
-        jobject visibleModel = ResolveSeeBarriersVisibleModel(env, modelShapes);
-        if (!visibleModel) {
-            ok = false;
-            DebugLog("See Barriers model override failed: no dirt model");
-        }
-        else {
-            std::vector<jobject> barrierStates;
-            if (!CollectSeeBarriersBarrierStates(env, barrierBlock, barrierStates)) {
-                ok = false;
-                DebugLog("See Barriers model override failed: no barrier states");
-            }
-            else {
-                ClearSeeBarriersStoredModelOverrides(env);
-                g_seeBarriersStoredModelOverrides.reserve(barrierStates.size());
-
-                for (jobject barrierState : barrierStates) {
-                    SeeBarriersStoredModelOverride stored = {};
-                    stored.state = env->NewGlobalRef(barrierState);
-                    if (!stored.state || env->ExceptionCheck()) {
-                        env->ExceptionClear();
-                        if (stored.state) env->DeleteGlobalRef(stored.state);
-                        stored.state = nullptr;
-                        ok = false;
-                        break;
-                    }
-
-                    jobject previousModel = env->CallObjectMethod(modelMap, g_seeBarriersMapPut, barrierState, visibleModel);
-                    if (env->ExceptionCheck()) {
-                        env->ExceptionClear();
-                        env->DeleteGlobalRef(stored.state);
-                        stored.state = nullptr;
-                        ok = false;
-                        break;
-                    }
-
-                    stored.hadOriginalModel = previousModel != nullptr;
-                    if (previousModel) {
-                        stored.originalModel = env->NewGlobalRef(previousModel);
-                        if (!stored.originalModel || env->ExceptionCheck()) {
-                            env->ExceptionClear();
-                            if (stored.originalModel) env->DeleteGlobalRef(stored.originalModel);
-                            stored.originalModel = nullptr;
-                            env->DeleteLocalRef(previousModel);
-                            env->DeleteGlobalRef(stored.state);
-                            stored.state = nullptr;
-                            ok = false;
-                            break;
-                        }
-                        env->DeleteLocalRef(previousModel);
-                    }
-
-                    g_seeBarriersStoredModelOverrides.push_back(stored);
-                }
-
-                if (!ok) {
-                    RestoreSeeBarriersStoredModelOverrides(env, modelMap);
-                    ClearSeeBarriersStoredModelOverrides(env);
-                }
-                else {
-                    g_seeBarriersBarrierModelOverridden = true;
-                    DebugLog("See Barriers model override applied states=%u", (unsigned int)g_seeBarriersStoredModelOverrides.size());
-                }
-
-                for (jobject barrierState : barrierStates) {
-                    env->DeleteLocalRef(barrierState);
-                }
-            }
-
-            env->DeleteLocalRef(visibleModel);
-        }
-    }
-    else {
-        ok = RestoreSeeBarriersStoredModelOverrides(env, modelMap);
-        if (!ok) {
-            DebugLog("See Barriers model override restore failed");
-        }
-        else {
-            g_seeBarriersBarrierModelOverridden = false;
-            DebugLog("See Barriers model override restored states=%u", (unsigned int)g_seeBarriersStoredModelOverrides.size());
-        }
-        ClearSeeBarriersStoredModelOverrides(env);
-    }
-
-    env->DeleteLocalRef(barrierBlock);
-    env->DeleteLocalRef(modelMap);
-    env->DeleteLocalRef(modelShapes);
-    return ok;
-}
-
-bool SetSeeBarriersMinecraftRendering(JNIEnv* env, bool enabled) {
-    if (enabled == g_seeBarriersMinecraftApplied) return true;
-    if (!EnsureSeeBarriersModelOverrideJNI(env)) return false;
-
-    if (!SetSeeBarriersModelOverride(env, enabled)) return false;
-
-    g_seeBarriersMinecraftApplied = enabled;
-    DebugLog("See Barriers Minecraft renderer state applied=%d", enabled ? 1 : 0);
-    return true;
-}
-
-void RequestSeeBarriersMinecraftRefresh() {
-    g_seeBarriersMinecraftFailed = false;
-    InterlockedExchange(&g_seeBarriersMinecraftRefreshPending, 1);
-}
-
-void ProcessSeeBarriersMinecraftRendering() {
-    bool requested = g_guiExtrasSeeBarriers && !g_seeBarriersMinecraftFailed;
-    bool pendingReload = InterlockedCompareExchange(&g_seeBarriersMinecraftRefreshPending, 0, 0) != 0;
-    if (requested == g_seeBarriersMinecraftApplied && !pendingReload) return;
-
-    JNIEnv* env = GetJNIEnvForCurrentThread();
-    if (!env) return;
-
-    if (pendingReload && requested && g_seeBarriersMinecraftApplied) {
-        if (!SetSeeBarriersMinecraftRendering(env, false)) {
-            DebugLog("See Barriers model override reset failed before reapply");
-            g_seeBarriersMinecraftFailed = true;
-            g_guiExtrasSeeBarriers = false;
-            InterlockedExchange(&g_seeBarriersMinecraftRefreshPending, 0);
-            return;
-        }
-    }
-
-    if (!SetSeeBarriersMinecraftRendering(env, requested)) {
-        DebugLog("See Barriers Minecraft renderer update failed requested=%d", requested ? 1 : 0);
-        if (requested) {
-            g_seeBarriersMinecraftFailed = true;
-            g_guiExtrasSeeBarriers = false;
-        }
-        InterlockedExchange(&g_seeBarriersMinecraftRefreshPending, 0);
-        return;
-    }
-
-    if (!g_slInited || g_slFailed) InitSnaplookJNI();
-    bool reloaded = RefreshPerspectiveRenderingWithEnv(env, true);
-    DebugLog("See Barriers renderer reload requested=%d applied=%d reloaded=%d",
-        requested ? 1 : 0,
-        g_seeBarriersMinecraftApplied ? 1 : 0,
-        reloaded ? 1 : 0);
-    InterlockedExchange(&g_seeBarriersMinecraftRefreshPending, 0);
-}
-
 struct TntVisualJNIContext {
     jclass mcClass = nullptr;
     jclass textureManagerClass = nullptr;
@@ -14367,17 +12834,6 @@ constexpr ULONGLONG kTntVisualRefreshIntervalMs = 500;
 constexpr const char* kBeaconBeamResourcePath = "textures/entity/beacon_beam.png";
 constexpr const char* kBlocksAtlasResourcePath = "textures/atlas/blocks.png";
 constexpr int kForcedWheatRenderStage = 0;
-constexpr int kBarrierBlockId = 166;
-constexpr int kSeeBarriersSectionsPerChunk = 16;
-constexpr int kSeeBarriersSectionBlockCount = 16 * 16 * 16;
-constexpr int kSeeBarriersScanSectionsPerFrame = 64;
-constexpr double kSeeBarriersScanBudgetMs = 0.45;
-constexpr ULONGLONG kSeeBarriersLoadedChunkSyncIntervalMs = 500;
-constexpr ULONGLONG kSeeBarriersChunkRescanIntervalMs = 30000;
-constexpr ULONGLONG kSeeBarriersDamageMarkerRefreshIntervalMs = 1000;
-constexpr int kSeeBarriersDamageMarkerStage = 9;
-constexpr int kSeeBarriersDamageMarkerMax = 256;
-constexpr int kSeeBarriersOverlayMaxBlocks = 512;
 const char* const kWheatStageSpriteNames[] = {
     "minecraft:blocks/wheat_stage_0",
     "minecraft:blocks/wheat_stage_1",
@@ -14398,81 +12854,6 @@ const char* const kWheatStageTextureResourcePaths[] = {
     "minecraft:textures/blocks/wheat_stage_6.png",
     "minecraft:textures/blocks/wheat_stage_7.png"
 };
-
-struct BarrierBlockPos {
-    int x = 0;
-    int y = 0;
-    int z = 0;
-};
-
-struct BarrierChunkCache {
-    int chunkX = 0;
-    int chunkZ = 0;
-    int nextSectionIndex = 0;
-    bool complete = false;
-    bool rescanning = false;
-    ULONGLONG completedAtMs = 0;
-    jobject chunkRef = nullptr;
-    std::vector<BarrierBlockPos> barriers;
-    std::unordered_set<int> barrierLocalKeys;
-    std::vector<BarrierBlockPos> pendingBarriers;
-    std::unordered_set<int> pendingLocalKeys;
-};
-
-struct SeeBarriersJNIContext {
-    jclass mcClass = nullptr;
-    jclass entityClass = nullptr;
-    jclass worldClass = nullptr;
-    jclass worldClientClass = nullptr;
-    jclass chunkProviderClass = nullptr;
-    jclass chunkClass = nullptr;
-    jclass extendedBlockStorageClass = nullptr;
-    jclass renderManagerClass = nullptr;
-    jclass renderGlobalClass = nullptr;
-    jclass listClass = nullptr;
-    jclass blockPosClass = nullptr;
-    jclass blockStateClass = nullptr;
-    jclass blockClass = nullptr;
-    jmethodID mGetMC = nullptr;
-    jmethodID mGetRenderManager = nullptr;
-    jmethodID mRenderGlobalSetBlockDamage = nullptr;
-    jmethodID mWorldGetBlockState = nullptr;
-    jmethodID mBlockStateGetBlock = nullptr;
-    jmethodID mBlockGetIdFromBlock = nullptr;
-    jmethodID mBlockPosCtor = nullptr;
-    jmethodID mBlockPosOffset = nullptr;
-    jmethodID mStorageGetData = nullptr;
-    jmethodID mListSize = nullptr;
-    jmethodID mListGet = nullptr;
-    jfieldID fWorld = nullptr;
-    jfieldID fThePlayer = nullptr;
-    jfieldID fRenderGlobal = nullptr;
-    jfieldID fEntityPosX = nullptr;
-    jfieldID fEntityPosY = nullptr;
-    jfieldID fEntityPosZ = nullptr;
-    jfieldID fWorldClientChunkProvider = nullptr;
-    jfieldID fLoadedChunks = nullptr;
-    jfieldID fChunkX = nullptr;
-    jfieldID fChunkZ = nullptr;
-    jfieldID fChunkStorageArrays = nullptr;
-    jfieldID fRenderPosX = nullptr;
-    jfieldID fRenderPosY = nullptr;
-    jfieldID fRenderPosZ = nullptr;
-    jobject cachedWorld = nullptr;
-    std::unordered_map<long long, BarrierChunkCache> chunkCaches;
-    std::unordered_map<int, BarrierBlockPos> activeDamageMarkers;
-    ULONGLONG lastChunkSyncMs = 0;
-    ULONGLONG lastDamageMarkerRefreshMs = 0;
-    double renderCameraX = 0.0;
-    double renderCameraY = 0.0;
-    double renderCameraZ = 0.0;
-    bool frameOverlayDrawn = false;
-    bool inited = false;
-    bool failed = false;
-    bool chunkCacheReady = false;
-};
-
-SeeBarriersJNIContext g_seeBarriersJNI;
 
 bool InitTntVisualJNI() {
     if (g_tntVisualJNI.failed) {
@@ -14697,21 +13078,6 @@ bool InitTntVisualJNI() {
     }
 
     return true;
-}
-
-bool InitSeeBarriersJNI() {
-    if (g_seeBarriersJNI.failed) {
-        g_seeBarriersJNI.failed = false;
-        g_seeBarriersJNI.inited = false;
-    }
-    if (g_seeBarriersJNI.inited) return true;
-    if (!g_env) return false;
-
-    bool ok = EnsureSeeBarriersModelOverrideJNI(g_env);
-    g_seeBarriersJNI.inited = ok;
-    g_seeBarriersJNI.failed = !ok;
-    DebugLog("See Barriers JNI ready modelSwap=%d", ok ? 1 : 0);
-    return ok;
 }
 
 bool IsValidAtlasSprite(JNIEnv* env, jobject sprite) {
@@ -15531,1003 +13897,6 @@ void UpdateTntVisualOverridesOnRenderThread() {
     }
 }
 
-bool GetSeeBarriersWorldAndPlayer(JNIEnv* env, jobject& world, jobject& player) {
-    world = nullptr;
-    player = nullptr;
-    if (!env || !g_seeBarriersJNI.mcClass || !g_seeBarriersJNI.mGetMC) return false;
-
-    jobject mc = env->CallStaticObjectMethod(g_seeBarriersJNI.mcClass, g_seeBarriersJNI.mGetMC);
-    if (!mc || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (mc) env->DeleteLocalRef(mc);
-        return false;
-    }
-
-    world = env->GetObjectField(mc, g_seeBarriersJNI.fWorld);
-    player = env->GetObjectField(mc, g_seeBarriersJNI.fThePlayer);
-    env->DeleteLocalRef(mc);
-
-    if (!world || !player || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (world) env->DeleteLocalRef(world);
-        if (player) env->DeleteLocalRef(player);
-        world = nullptr;
-        player = nullptr;
-        return false;
-    }
-
-    return true;
-}
-
-bool UpdateSeeBarriersRenderCameraFromRenderManager(JNIEnv* env) {
-    if (!env || !g_seeBarriersJNI.mcClass || !g_seeBarriersJNI.mGetMC ||
-        !g_seeBarriersJNI.mGetRenderManager ||
-        !g_seeBarriersJNI.fRenderPosX || !g_seeBarriersJNI.fRenderPosY || !g_seeBarriersJNI.fRenderPosZ) {
-        return false;
-    }
-
-    jobject mc = env->CallStaticObjectMethod(g_seeBarriersJNI.mcClass, g_seeBarriersJNI.mGetMC);
-    if (!mc || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (mc) env->DeleteLocalRef(mc);
-        return false;
-    }
-
-    jobject renderManager = env->CallObjectMethod(mc, g_seeBarriersJNI.mGetRenderManager);
-    env->DeleteLocalRef(mc);
-    if (!renderManager || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (renderManager) env->DeleteLocalRef(renderManager);
-        return false;
-    }
-
-    double renderX = env->GetDoubleField(renderManager, g_seeBarriersJNI.fRenderPosX);
-    double renderY = env->GetDoubleField(renderManager, g_seeBarriersJNI.fRenderPosY);
-    double renderZ = env->GetDoubleField(renderManager, g_seeBarriersJNI.fRenderPosZ);
-    env->DeleteLocalRef(renderManager);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return false;
-    }
-
-    g_seeBarriersJNI.renderCameraX = renderX;
-    g_seeBarriersJNI.renderCameraY = renderY;
-    g_seeBarriersJNI.renderCameraZ = renderZ;
-    return true;
-}
-
-bool IsBarrierBlockAt(JNIEnv* env, jobject world, int x, int y, int z) {
-    if (!env || !world) return false;
-
-    jobject pos = env->NewObject(g_seeBarriersJNI.blockPosClass, g_seeBarriersJNI.mBlockPosCtor, x, y, z);
-    if (!pos || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (pos) env->DeleteLocalRef(pos);
-        return false;
-    }
-
-    jobject state = env->CallObjectMethod(world, g_seeBarriersJNI.mWorldGetBlockState, pos);
-    env->DeleteLocalRef(pos);
-    if (!state || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (state) env->DeleteLocalRef(state);
-        return false;
-    }
-
-    jobject block = env->CallObjectMethod(state, g_seeBarriersJNI.mBlockStateGetBlock);
-    env->DeleteLocalRef(state);
-    if (!block || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (block) env->DeleteLocalRef(block);
-        return false;
-    }
-
-    jint blockId = env->CallStaticIntMethod(g_seeBarriersJNI.blockClass, g_seeBarriersJNI.mBlockGetIdFromBlock, block);
-    env->DeleteLocalRef(block);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return false;
-    }
-
-    return blockId == kBarrierBlockId;
-}
-
-void ResetSeeBarriersCache(JNIEnv* env) {
-    ClearSeeBarriersDamageMarkers(env);
-    if (env && g_seeBarriersJNI.cachedWorld) {
-        env->DeleteGlobalRef(g_seeBarriersJNI.cachedWorld);
-    }
-
-    if (env) {
-        for (auto& entry : g_seeBarriersJNI.chunkCaches) {
-            if (entry.second.chunkRef) {
-                env->DeleteGlobalRef(entry.second.chunkRef);
-                entry.second.chunkRef = nullptr;
-            }
-        }
-    }
-
-    g_seeBarriersJNI.cachedWorld = nullptr;
-    g_seeBarriersJNI.chunkCaches.clear();
-    g_seeBarriersJNI.lastChunkSyncMs = 0;
-    g_seeBarriersJNI.lastDamageMarkerRefreshMs = 0;
-    g_seeBarriersJNI.frameOverlayDrawn = false;
-}
-
-void EnsureSeeBarriersWorldCache(JNIEnv* env, jobject world) {
-    if (!env || !world) return;
-
-    if (g_seeBarriersJNI.cachedWorld && !env->IsSameObject(g_seeBarriersJNI.cachedWorld, world)) {
-        ResetSeeBarriersCache(env);
-    }
-
-    if (!g_seeBarriersJNI.cachedWorld) {
-        g_seeBarriersJNI.cachedWorld = env->NewGlobalRef(world);
-        if (!g_seeBarriersJNI.cachedWorld || env->ExceptionCheck()) {
-            env->ExceptionClear();
-            g_seeBarriersJNI.cachedWorld = nullptr;
-        }
-    }
-}
-
-long long MakeBarrierChunkKey(int chunkX, int chunkZ) {
-    return ((long long)chunkX << 32) ^ (unsigned int)chunkZ;
-}
-
-int MakeBarrierLocalKey(int localX, int y, int localZ) {
-    return ((y & 0xff) << 8) | ((localZ & 0x0f) << 4) | (localX & 0x0f);
-}
-
-int FloorDiv16(int value) {
-    return value >= 0 ? (value >> 4) : -(((-value) + 15) >> 4);
-}
-
-long long BarrierChunkDistanceScore(const BarrierChunkCache& chunk, int centerChunkX, int centerChunkZ) {
-    long long dx = (long long)chunk.chunkX - (long long)centerChunkX;
-    long long dz = (long long)chunk.chunkZ - (long long)centerChunkZ;
-    return (dx * dx) + (dz * dz);
-}
-
-void ReleaseBarrierChunkCache(JNIEnv* env, BarrierChunkCache& chunk) {
-    if (env && chunk.chunkRef) {
-        env->DeleteGlobalRef(chunk.chunkRef);
-        chunk.chunkRef = nullptr;
-    }
-}
-
-void ResetBarrierChunkScan(BarrierChunkCache& chunk) {
-    chunk.nextSectionIndex = 0;
-    chunk.complete = false;
-    chunk.rescanning = false;
-    chunk.completedAtMs = 0;
-    chunk.barriers.clear();
-    chunk.barrierLocalKeys.clear();
-    chunk.pendingBarriers.clear();
-    chunk.pendingLocalKeys.clear();
-}
-
-void StartBarrierChunkRescan(BarrierChunkCache& chunk) {
-    if (chunk.rescanning) return;
-    chunk.rescanning = true;
-    chunk.complete = false;
-    chunk.nextSectionIndex = 0;
-    chunk.pendingBarriers.clear();
-    chunk.pendingLocalKeys.clear();
-}
-
-void FinishBarrierChunkScan(BarrierChunkCache& chunk, ULONGLONG now) {
-    chunk.complete = true;
-    chunk.nextSectionIndex = kSeeBarriersSectionsPerChunk;
-    chunk.completedAtMs = now;
-    if (chunk.rescanning) {
-        chunk.barriers.swap(chunk.pendingBarriers);
-        chunk.barrierLocalKeys.swap(chunk.pendingLocalKeys);
-        chunk.pendingBarriers.clear();
-        chunk.pendingLocalKeys.clear();
-        chunk.rescanning = false;
-    }
-}
-
-void AddBarrierToChunk(BarrierChunkCache& chunk, int localX, int y, int localZ) {
-    int localKey = MakeBarrierLocalKey(localX, y, localZ);
-    std::unordered_set<int>& keys = chunk.rescanning ? chunk.pendingLocalKeys : chunk.barrierLocalKeys;
-    if (!keys.insert(localKey).second) return;
-
-    BarrierBlockPos pos;
-    pos.x = (chunk.chunkX << 4) + localX;
-    pos.y = y;
-    pos.z = (chunk.chunkZ << 4) + localZ;
-    std::vector<BarrierBlockPos>& target = chunk.rescanning ? chunk.pendingBarriers : chunk.barriers;
-    target.push_back(pos);
-}
-
-jobject GetSeeBarriersLoadedChunkList(JNIEnv* env, jobject world) {
-    if (!env || !world || !g_seeBarriersJNI.chunkCacheReady) return nullptr;
-
-    jobject provider = env->GetObjectField(world, g_seeBarriersJNI.fWorldClientChunkProvider);
-    if (!provider || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (provider) env->DeleteLocalRef(provider);
-        return nullptr;
-    }
-
-    jobject chunks = env->GetObjectField(provider, g_seeBarriersJNI.fLoadedChunks);
-    env->DeleteLocalRef(provider);
-    if (!chunks || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (chunks) env->DeleteLocalRef(chunks);
-        return nullptr;
-    }
-
-    return chunks;
-}
-
-bool SyncLoadedBarrierChunks(JNIEnv* env, jobject world, ULONGLONG now) {
-    if (!env || !world || !g_seeBarriersJNI.chunkCacheReady) return false;
-
-    jobject chunks = GetSeeBarriersLoadedChunkList(env, world);
-    if (!chunks) return false;
-
-    jint chunkCount = env->CallIntMethod(chunks, g_seeBarriersJNI.mListSize);
-    if (env->ExceptionCheck() || chunkCount <= 0) {
-        env->ExceptionClear();
-        for (auto& entry : g_seeBarriersJNI.chunkCaches) {
-            ReleaseBarrierChunkCache(env, entry.second);
-        }
-        g_seeBarriersJNI.chunkCaches.clear();
-        g_seeBarriersJNI.lastChunkSyncMs = now;
-        env->DeleteLocalRef(chunks);
-        return false;
-    }
-
-    std::unordered_set<long long> loadedKeys;
-    loadedKeys.reserve((size_t)chunkCount);
-    for (jint chunkIndex = 0; chunkIndex < chunkCount; ++chunkIndex) {
-        jobject chunk = env->CallObjectMethod(chunks, g_seeBarriersJNI.mListGet, chunkIndex);
-        if (!chunk || env->ExceptionCheck()) {
-            env->ExceptionClear();
-            if (chunk) env->DeleteLocalRef(chunk);
-            continue;
-        }
-
-        jint chunkX = env->GetIntField(chunk, g_seeBarriersJNI.fChunkX);
-        jint chunkZ = env->GetIntField(chunk, g_seeBarriersJNI.fChunkZ);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            env->DeleteLocalRef(chunk);
-            continue;
-        }
-
-        long long key = MakeBarrierChunkKey((int)chunkX, (int)chunkZ);
-        loadedKeys.insert(key);
-
-        auto cacheIt = g_seeBarriersJNI.chunkCaches.find(key);
-        if (cacheIt == g_seeBarriersJNI.chunkCaches.end()) {
-            BarrierChunkCache cache;
-            cache.chunkX = (int)chunkX;
-            cache.chunkZ = (int)chunkZ;
-            cacheIt = g_seeBarriersJNI.chunkCaches.emplace(key, std::move(cache)).first;
-        }
-
-        BarrierChunkCache& cache = cacheIt->second;
-        bool sameChunkObject = cache.chunkRef && env->IsSameObject(cache.chunkRef, chunk);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            sameChunkObject = false;
-        }
-
-        if (!sameChunkObject) {
-            bool hadPreviousChunkRef = cache.chunkRef != nullptr;
-            ReleaseBarrierChunkCache(env, cache);
-            cache.chunkRef = env->NewGlobalRef(chunk);
-            if (!cache.chunkRef || env->ExceptionCheck()) {
-                env->ExceptionClear();
-                cache.chunkRef = nullptr;
-            }
-            else if (hadPreviousChunkRef) {
-                ResetBarrierChunkScan(cache);
-            }
-        }
-
-        env->DeleteLocalRef(chunk);
-    }
-
-    for (auto it = g_seeBarriersJNI.chunkCaches.begin(); it != g_seeBarriersJNI.chunkCaches.end();) {
-        if (loadedKeys.find(it->first) == loadedKeys.end()) {
-            ReleaseBarrierChunkCache(env, it->second);
-            it = g_seeBarriersJNI.chunkCaches.erase(it);
-        }
-        else {
-            ++it;
-        }
-    }
-
-    g_seeBarriersJNI.lastChunkSyncMs = now;
-    env->DeleteLocalRef(chunks);
-    return true;
-}
-
-bool IsSeeBarriersScanBudgetExpired(const LARGE_INTEGER& startCounter) {
-    if (g_perfFreq.QuadPart <= 0) return false;
-
-    LARGE_INTEGER nowCounter = {};
-    QueryPerformanceCounter(&nowCounter);
-    double elapsedMs = ((double)(nowCounter.QuadPart - startCounter.QuadPart) * 1000.0) / (double)g_perfFreq.QuadPart;
-    return elapsedMs >= kSeeBarriersScanBudgetMs;
-}
-
-bool ScanBarrierChunkSection(JNIEnv* env, BarrierChunkCache& chunk, int sectionIndex) {
-    if (!env || !chunk.chunkRef || sectionIndex < 0 || sectionIndex >= kSeeBarriersSectionsPerChunk) return false;
-
-    jobjectArray sections = (jobjectArray)env->GetObjectField(chunk.chunkRef, g_seeBarriersJNI.fChunkStorageArrays);
-    if (!sections || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (sections) env->DeleteLocalRef(sections);
-        return false;
-    }
-
-    jsize sectionCount = env->GetArrayLength(sections);
-    if (env->ExceptionCheck() || sectionIndex >= sectionCount) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(sections);
-        return true;
-    }
-
-    jobject section = env->GetObjectArrayElement(sections, sectionIndex);
-    env->DeleteLocalRef(sections);
-    if (!section || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (section) env->DeleteLocalRef(section);
-        return true;
-    }
-
-    jcharArray dataArray = (jcharArray)env->CallObjectMethod(section, g_seeBarriersJNI.mStorageGetData);
-    env->DeleteLocalRef(section);
-    if (!dataArray || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (dataArray) env->DeleteLocalRef(dataArray);
-        return true;
-    }
-
-    jsize dataLength = env->GetArrayLength(dataArray);
-    if (env->ExceptionCheck() || dataLength < kSeeBarriersSectionBlockCount) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(dataArray);
-        return true;
-    }
-
-    std::array<jchar, kSeeBarriersSectionBlockCount> stateIds = {};
-    env->GetCharArrayRegion(dataArray, 0, kSeeBarriersSectionBlockCount, stateIds.data());
-    env->DeleteLocalRef(dataArray);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return true;
-    }
-
-    int sectionY = sectionIndex << 4;
-    for (int index = 0; index < kSeeBarriersSectionBlockCount; ++index) {
-        int stateId = (int)stateIds[(size_t)index];
-        if ((stateId >> 4) != kBarrierBlockId) continue;
-
-        int localX = index & 15;
-        int localZ = (index >> 4) & 15;
-        int y = sectionY + ((index >> 8) & 15);
-        AddBarrierToChunk(chunk, localX, y, localZ);
-    }
-
-    return true;
-}
-
-void ScanBarrierChunksBudgeted(JNIEnv* env, jobject world, int centerChunkX, int centerChunkZ, ULONGLONG now) {
-    (void)world;
-    if (!env || !world || !g_seeBarriersJNI.chunkCacheReady || g_seeBarriersJNI.chunkCaches.empty()) return;
-
-    struct ChunkWorkItem {
-        long long key = 0;
-        long long distance = 0;
-    };
-
-    std::vector<ChunkWorkItem> workItems;
-    workItems.reserve(g_seeBarriersJNI.chunkCaches.size());
-    for (auto& entry : g_seeBarriersJNI.chunkCaches) {
-        BarrierChunkCache& chunk = entry.second;
-        if (chunk.complete && chunk.completedAtMs != 0 && (now - chunk.completedAtMs) >= kSeeBarriersChunkRescanIntervalMs) {
-            StartBarrierChunkRescan(chunk);
-        }
-        if (!chunk.complete) {
-            ChunkWorkItem item;
-            item.key = entry.first;
-            item.distance = BarrierChunkDistanceScore(chunk, centerChunkX, centerChunkZ);
-            workItems.push_back(item);
-        }
-    }
-
-    if (workItems.empty()) return;
-    std::sort(workItems.begin(), workItems.end(), [](const ChunkWorkItem& a, const ChunkWorkItem& b) {
-        return a.distance < b.distance;
-    });
-
-    LARGE_INTEGER startCounter = {};
-    QueryPerformanceCounter(&startCounter);
-
-    int remainingSections = kSeeBarriersScanSectionsPerFrame;
-    int sectionsSinceTimePoll = 0;
-    for (const ChunkWorkItem& item : workItems) {
-        auto chunkIt = g_seeBarriersJNI.chunkCaches.find(item.key);
-        if (chunkIt == g_seeBarriersJNI.chunkCaches.end()) continue;
-
-        BarrierChunkCache& chunk = chunkIt->second;
-        if (!chunk.chunkRef) continue;
-
-        while (!chunk.complete && remainingSections > 0) {
-            int sectionIndex = chunk.nextSectionIndex++;
-            if (sectionIndex >= kSeeBarriersSectionsPerChunk) {
-                FinishBarrierChunkScan(chunk, now);
-                break;
-            }
-
-            ScanBarrierChunkSection(env, chunk, sectionIndex);
-
-            --remainingSections;
-            ++sectionsSinceTimePoll;
-            if (sectionsSinceTimePoll >= 4) {
-                sectionsSinceTimePoll = 0;
-                if (IsSeeBarriersScanBudgetExpired(startCounter)) return;
-            }
-        }
-
-        if (!chunk.complete && chunk.nextSectionIndex >= kSeeBarriersSectionsPerChunk) {
-            FinishBarrierChunkScan(chunk, now);
-        }
-
-        if (remainingSections <= 0 || IsSeeBarriersScanBudgetExpired(startCounter)) return;
-    }
-}
-
-int MakeSeeBarriersDamageMarkerId(const BarrierBlockPos& pos) {
-    uint32_t h = 2166136261u;
-    h = (h ^ (uint32_t)pos.x) * 16777619u;
-    h = (h ^ (uint32_t)pos.y) * 16777619u;
-    h = (h ^ (uint32_t)pos.z) * 16777619u;
-    return (int)(0x5E000000u | (h & 0x00FFFFFFu));
-}
-
-jobject GetSeeBarriersRenderGlobal(JNIEnv* env) {
-    if (!env || !g_seeBarriersJNI.mcClass || !g_seeBarriersJNI.mGetMC ||
-        !g_seeBarriersJNI.fRenderGlobal) {
-        return nullptr;
-    }
-
-    jobject mc = env->CallStaticObjectMethod(g_seeBarriersJNI.mcClass, g_seeBarriersJNI.mGetMC);
-    if (!mc || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (mc) env->DeleteLocalRef(mc);
-        return nullptr;
-    }
-
-    jobject renderGlobal = env->GetObjectField(mc, g_seeBarriersJNI.fRenderGlobal);
-    env->DeleteLocalRef(mc);
-    if (!renderGlobal || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (renderGlobal) env->DeleteLocalRef(renderGlobal);
-        return nullptr;
-    }
-
-    return renderGlobal;
-}
-
-bool SetSeeBarriersDamageMarker(JNIEnv* env, jobject renderGlobal, const BarrierBlockPos& pos, int stage) {
-    if (!env || !renderGlobal || !g_seeBarriersJNI.blockPosClass ||
-        !g_seeBarriersJNI.mBlockPosCtor || !g_seeBarriersJNI.mRenderGlobalSetBlockDamage) {
-        return false;
-    }
-
-    jobject blockPos = env->NewObject(
-        g_seeBarriersJNI.blockPosClass,
-        g_seeBarriersJNI.mBlockPosCtor,
-        (jint)pos.x,
-        (jint)pos.y,
-        (jint)pos.z);
-    if (!blockPos || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (blockPos) env->DeleteLocalRef(blockPos);
-        return false;
-    }
-
-    env->CallVoidMethod(
-        renderGlobal,
-        g_seeBarriersJNI.mRenderGlobalSetBlockDamage,
-        (jint)MakeSeeBarriersDamageMarkerId(pos),
-        blockPos,
-        (jint)stage);
-    env->DeleteLocalRef(blockPos);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        return false;
-    }
-
-    return true;
-}
-
-void ClearSeeBarriersDamageMarkers(JNIEnv* env) {
-    if (!env || g_seeBarriersJNI.activeDamageMarkers.empty()) return;
-
-    jobject renderGlobal = GetSeeBarriersRenderGlobal(env);
-    if (!renderGlobal) {
-        g_seeBarriersJNI.activeDamageMarkers.clear();
-        return;
-    }
-
-    for (const auto& entry : g_seeBarriersJNI.activeDamageMarkers) {
-        SetSeeBarriersDamageMarker(env, renderGlobal, entry.second, -1);
-    }
-    g_seeBarriersJNI.activeDamageMarkers.clear();
-    g_seeBarriersJNI.lastDamageMarkerRefreshMs = 0;
-    env->DeleteLocalRef(renderGlobal);
-}
-
-bool IsSeeBarriersMarkerInRange(const BarrierBlockPos& pos, int range, bool infiniteRange, double playerX, double playerZ, double& distanceSq) {
-    double dx = ((double)pos.x + 0.5) - playerX;
-    double dz = ((double)pos.z + 0.5) - playerZ;
-    distanceSq = (dx * dx) + (dz * dz);
-    if (infiniteRange) return true;
-
-    double radius = (double)range + 0.5;
-    return distanceSq <= radius * radius;
-}
-
-jobject GetSeeBarriersWorldStateAt(JNIEnv* env, jobject world, const BarrierBlockPos& pos) {
-    if (!env || !world || !g_seeBarriersJNI.blockPosClass ||
-        !g_seeBarriersJNI.mBlockPosCtor || !g_seeBarriersJNI.mWorldGetBlockState) {
-        return nullptr;
-    }
-
-    jobject blockPos = env->NewObject(
-        g_seeBarriersJNI.blockPosClass,
-        g_seeBarriersJNI.mBlockPosCtor,
-        (jint)pos.x,
-        (jint)pos.y,
-        (jint)pos.z);
-    if (!blockPos || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (blockPos) env->DeleteLocalRef(blockPos);
-        return nullptr;
-    }
-
-    jobject state = env->CallObjectMethod(world, g_seeBarriersJNI.mWorldGetBlockState, blockPos);
-    env->DeleteLocalRef(blockPos);
-    if (!state || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (state) env->DeleteLocalRef(state);
-        return nullptr;
-    }
-
-    return state;
-}
-
-jobject GetSeeBarriersActualWorldStateAt(JNIEnv* env, jobject world, const BarrierBlockPos& pos, jobject state) {
-    if (!env || !world || !state || !g_seeBarriersJNI.blockPosClass ||
-        !g_seeBarriersJNI.mBlockPosCtor || !g_seeBarriersJNI.mBlockStateGetBlock ||
-        !g_seeBarriersBlockGetActualState) {
-        return nullptr;
-    }
-
-    jobject block = env->CallObjectMethod(state, g_seeBarriersJNI.mBlockStateGetBlock);
-    if (!block || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (block) env->DeleteLocalRef(block);
-        return nullptr;
-    }
-
-    jobject blockPos = env->NewObject(
-        g_seeBarriersJNI.blockPosClass,
-        g_seeBarriersJNI.mBlockPosCtor,
-        (jint)pos.x,
-        (jint)pos.y,
-        (jint)pos.z);
-    if (!blockPos || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(block);
-        if (blockPos) env->DeleteLocalRef(blockPos);
-        return nullptr;
-    }
-
-    jobject actualState = env->CallObjectMethod(block, g_seeBarriersBlockGetActualState, state, world, blockPos);
-    env->DeleteLocalRef(blockPos);
-    env->DeleteLocalRef(block);
-    if (!actualState || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (actualState) env->DeleteLocalRef(actualState);
-        return nullptr;
-    }
-
-    return actualState;
-}
-
-void LogSeeBarriersDispatcherSample(JNIEnv* env, jobject world, const BarrierBlockPos& pos, jobject rawState, jobject visibleModel, jobject modelShapes) {
-    if (!env || !world || !rawState || !visibleModel || !modelShapes ||
-        !g_slGetMC || !g_seeBarriersMinecraftGetBlockRendererDispatcher ||
-        !g_seeBarriersBlockRendererGetModelForWorldState || !g_seeBarriersBlockShouldSideBeRendered ||
-        !g_seeBarriersDirectionValues || !g_seeBarriersJNI.blockPosClass || !g_seeBarriersJNI.mBlockPosCtor ||
-        !g_seeBarriersJNI.mBlockStateGetBlock) {
-        return;
-    }
-
-    static ULONGLONG s_lastSampleLogMs = 0;
-    ULONGLONG now = GetTickCount64();
-    if ((now - s_lastSampleLogMs) < 1500) return;
-
-    jobject mc = env->CallStaticObjectMethod(g_slMcClass, g_slGetMC);
-    if (!mc || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (mc) env->DeleteLocalRef(mc);
-        return;
-    }
-
-    jobject dispatcher = env->CallObjectMethod(mc, g_seeBarriersMinecraftGetBlockRendererDispatcher);
-    env->DeleteLocalRef(mc);
-    if (!dispatcher || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (dispatcher) env->DeleteLocalRef(dispatcher);
-        return;
-    }
-
-    jobject blockPos = env->NewObject(
-        g_seeBarriersJNI.blockPosClass,
-        g_seeBarriersJNI.mBlockPosCtor,
-        (jint)pos.x,
-        (jint)pos.y,
-        (jint)pos.z);
-    if (!blockPos || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(dispatcher);
-        if (blockPos) env->DeleteLocalRef(blockPos);
-        return;
-    }
-
-    jobject dispatcherModel = env->CallObjectMethod(dispatcher, g_seeBarriersBlockRendererGetModelForWorldState, rawState, world, blockPos);
-    if (!dispatcherModel || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(blockPos);
-        env->DeleteLocalRef(dispatcher);
-        if (dispatcherModel) env->DeleteLocalRef(dispatcherModel);
-        return;
-    }
-
-    jobject rawBlock = env->CallObjectMethod(rawState, g_seeBarriersJNI.mBlockStateGetBlock);
-    if (!rawBlock || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(dispatcherModel);
-        env->DeleteLocalRef(blockPos);
-        env->DeleteLocalRef(dispatcher);
-        if (rawBlock) env->DeleteLocalRef(rawBlock);
-        return;
-    }
-
-    jboolean modelMatchesVisible = env->IsSameObject(dispatcherModel, visibleModel);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        modelMatchesVisible = JNI_FALSE;
-    }
-
-    jobject actualState = GetSeeBarriersActualWorldStateAt(env, world, pos, rawState);
-    jboolean actualSameAsRaw = JNI_FALSE;
-    if (actualState) {
-        actualSameAsRaw = env->IsSameObject(actualState, rawState);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            actualSameAsRaw = JNI_FALSE;
-        }
-    }
-
-    std::string sideBits;
-    sideBits.reserve(6);
-    jobjectArray directions = (jobjectArray)env->CallStaticObjectMethod(g_seeBarriersDirectionClass, g_seeBarriersDirectionValues);
-    if (directions && !env->ExceptionCheck()) {
-        jsize count = env->GetArrayLength(directions);
-        for (jsize i = 0; i < count; ++i) {
-            jobject direction = env->GetObjectArrayElement(directions, i);
-            if (!direction || env->ExceptionCheck()) {
-                env->ExceptionClear();
-                if (direction) env->DeleteLocalRef(direction);
-                sideBits.push_back('?');
-                continue;
-            }
-
-            jobject sidePos = env->CallObjectMethod(blockPos, g_seeBarriersJNI.mBlockPosOffset, direction);
-            if (!sidePos || env->ExceptionCheck()) {
-                env->ExceptionClear();
-                if (sidePos) env->DeleteLocalRef(sidePos);
-                env->DeleteLocalRef(direction);
-                sideBits.push_back('0');
-                continue;
-            }
-
-            jboolean renderSide = env->CallBooleanMethod(rawBlock, g_seeBarriersBlockShouldSideBeRendered, world, sidePos, direction);
-            if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-                renderSide = JNI_FALSE;
-            }
-
-            sideBits.push_back(renderSide == JNI_TRUE ? '1' : '0');
-            env->DeleteLocalRef(sidePos);
-            env->DeleteLocalRef(direction);
-        }
-        env->DeleteLocalRef(directions);
-    }
-    else {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-    }
-
-    DebugLog("See Barriers dispatcher sample pos=%d,%d,%d modelMatchesVisible=%d actualSameAsRaw=%d sides=%s",
-        pos.x,
-        pos.y,
-        pos.z,
-        modelMatchesVisible == JNI_TRUE ? 1 : 0,
-        actualSameAsRaw == JNI_TRUE ? 1 : 0,
-        sideBits.empty() ? "-" : sideBits.c_str());
-    s_lastSampleLogMs = now;
-
-    if (actualState) env->DeleteLocalRef(actualState);
-    env->DeleteLocalRef(rawBlock);
-    env->DeleteLocalRef(dispatcherModel);
-    env->DeleteLocalRef(blockPos);
-    env->DeleteLocalRef(dispatcher);
-}
-
-void RefreshSeeBarriersObservedStateModelOverrides(JNIEnv* env, jobject world, ULONGLONG now) {
-    if (!env || !world || !g_guiExtrasSeeBarriers || !g_seeBarriersMinecraftApplied ||
-        !g_seeBarriersJNI.chunkCacheReady || g_seeBarriersJNI.chunkCaches.empty()) {
-        return;
-    }
-
-    static ULONGLONG s_lastRefreshMs = 0;
-    if ((now - s_lastRefreshMs) < 750) return;
-    s_lastRefreshMs = now;
-
-    if (!EnsureSeeBarriersModelOverrideJNI(env)) return;
-
-    jobject modelShapes = GetSeeBarriersModelShapes(env);
-    if (!modelShapes) return;
-
-    jobject modelMap = env->GetObjectField(modelShapes, g_seeBarriersBlockModelShapesModelMap);
-    if (!modelMap || env->ExceptionCheck()) {
-        env->ExceptionClear();
-        if (modelMap) env->DeleteLocalRef(modelMap);
-        env->DeleteLocalRef(modelShapes);
-        return;
-    }
-
-    jobject visibleModel = ResolveSeeBarriersVisibleModel(env, modelShapes);
-    if (!visibleModel) {
-        env->DeleteLocalRef(modelMap);
-        env->DeleteLocalRef(modelShapes);
-        return;
-    }
-
-    int examinedStates = 0;
-    int appliedStates = 0;
-    int newStates = 0;
-    int replacedStates = 0;
-    const int kMaxStatesPerRefresh = 192;
-    bool sampled = false;
-
-    for (const auto& entry : g_seeBarriersJNI.chunkCaches) {
-        const BarrierChunkCache& chunk = entry.second;
-        for (const BarrierBlockPos& pos : chunk.barriers) {
-            if (examinedStates >= kMaxStatesPerRefresh) break;
-            ++examinedStates;
-
-            jobject state = GetSeeBarriersWorldStateAt(env, world, pos);
-            if (!state) continue;
-
-            jobject previousModel = env->CallObjectMethod(modelMap, g_seeBarriersMapPut, state, visibleModel);
-            if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-                if (previousModel) env->DeleteLocalRef(previousModel);
-                env->DeleteLocalRef(state);
-                continue;
-            }
-
-            ++appliedStates;
-            if (!previousModel) {
-                ++newStates;
-            }
-            else {
-                jboolean sameAsVisible = env->IsSameObject(previousModel, visibleModel);
-                if (env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                }
-                else if (sameAsVisible != JNI_TRUE) {
-                    ++replacedStates;
-                }
-                env->DeleteLocalRef(previousModel);
-            }
-
-            jobject actualState = GetSeeBarriersActualWorldStateAt(env, world, pos, state);
-            if (actualState) {
-                jobject actualPreviousModel = env->CallObjectMethod(modelMap, g_seeBarriersMapPut, actualState, visibleModel);
-                if (env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                }
-                else if (actualPreviousModel) {
-                    env->DeleteLocalRef(actualPreviousModel);
-                }
-            }
-
-            if (!sampled) {
-                LogSeeBarriersDispatcherSample(env, world, pos, state, visibleModel, modelShapes);
-                sampled = true;
-            }
-
-            if (actualState) env->DeleteLocalRef(actualState);
-            env->DeleteLocalRef(state);
-        }
-        if (examinedStates >= kMaxStatesPerRefresh) break;
-    }
-
-    env->DeleteLocalRef(visibleModel);
-    env->DeleteLocalRef(modelMap);
-    env->DeleteLocalRef(modelShapes);
-
-    static ULONGLONG s_lastLogMs = 0;
-    if ((appliedStates > 0 || newStates > 0 || replacedStates > 0) &&
-        (now - s_lastLogMs) >= 1500) {
-        DebugLog("See Barriers observed-state model refresh examined=%d applied=%d new=%d replaced=%d",
-            examinedStates,
-            appliedStates,
-            newStates,
-            replacedStates);
-        s_lastLogMs = now;
-    }
-}
-
-void RefreshSeeBarriersDamageMarkers(JNIEnv* env, double playerX, double playerZ, ULONGLONG now) {
-    if (!env || !g_guiExtrasSeeBarriers || !g_seeBarriersMinecraftApplied ||
-        !g_seeBarriersJNI.chunkCacheReady || !g_seeBarriersJNI.mRenderGlobalSetBlockDamage) {
-        return;
-    }
-    if ((now - g_seeBarriersJNI.lastDamageMarkerRefreshMs) < kSeeBarriersDamageMarkerRefreshIntervalMs) {
-        return;
-    }
-
-    struct MarkerWorkItem {
-        BarrierBlockPos pos;
-        double distanceSq = 0.0;
-    };
-
-    int range = NormalizeSeeBarriersRange(g_guiSeeBarriersRange);
-    bool infiniteRange = IsSeeBarriersRangeInfinite(range);
-    std::vector<MarkerWorkItem> markers;
-
-    for (const auto& entry : g_seeBarriersJNI.chunkCaches) {
-        const BarrierChunkCache& chunk = entry.second;
-        for (const BarrierBlockPos& pos : chunk.barriers) {
-            double distanceSq = 0.0;
-            if (!IsSeeBarriersMarkerInRange(pos, range, infiniteRange, playerX, playerZ, distanceSq)) continue;
-
-            MarkerWorkItem item;
-            item.pos = pos;
-            item.distanceSq = distanceSq;
-            markers.push_back(item);
-        }
-    }
-
-    if (markers.empty() && g_seeBarriersJNI.activeDamageMarkers.empty()) {
-        g_seeBarriersJNI.lastDamageMarkerRefreshMs = now;
-        return;
-    }
-
-    if (markers.size() > (size_t)kSeeBarriersDamageMarkerMax) {
-        std::nth_element(
-            markers.begin(),
-            markers.begin() + kSeeBarriersDamageMarkerMax,
-            markers.end(),
-            [](const MarkerWorkItem& a, const MarkerWorkItem& b) {
-                return a.distanceSq < b.distanceSq;
-            });
-        markers.resize((size_t)kSeeBarriersDamageMarkerMax);
-    }
-
-    jobject renderGlobal = GetSeeBarriersRenderGlobal(env);
-    if (!renderGlobal) return;
-
-    std::unordered_set<int> refreshedIds;
-    refreshedIds.reserve(markers.size() * 2 + 1);
-
-    int refreshedCount = 0;
-    for (const MarkerWorkItem& marker : markers) {
-        int markerId = MakeSeeBarriersDamageMarkerId(marker.pos);
-        refreshedIds.insert(markerId);
-        if (SetSeeBarriersDamageMarker(env, renderGlobal, marker.pos, kSeeBarriersDamageMarkerStage)) {
-            g_seeBarriersJNI.activeDamageMarkers[markerId] = marker.pos;
-            ++refreshedCount;
-        }
-    }
-
-    for (auto it = g_seeBarriersJNI.activeDamageMarkers.begin(); it != g_seeBarriersJNI.activeDamageMarkers.end();) {
-        if (refreshedIds.find(it->first) == refreshedIds.end()) {
-            SetSeeBarriersDamageMarker(env, renderGlobal, it->second, -1);
-            it = g_seeBarriersJNI.activeDamageMarkers.erase(it);
-        }
-        else {
-            ++it;
-        }
-    }
-
-    g_seeBarriersJNI.lastDamageMarkerRefreshMs = now;
-    env->DeleteLocalRef(renderGlobal);
-
-    static ULONGLONG s_lastMarkerLogMs = 0;
-    if ((now - s_lastMarkerLogMs) >= 2000) {
-        DebugLog("See Barriers damage markers refreshed=%d active=%u candidates=%u cap=%d",
-            refreshedCount,
-            (unsigned int)g_seeBarriersJNI.activeDamageMarkers.size(),
-            (unsigned int)markers.size(),
-            kSeeBarriersDamageMarkerMax);
-        s_lastMarkerLogMs = now;
-    }
-}
-
-void UpdateSeeBarriersOnRenderThread() {
-    static int s_lastLoggedEnabled = -1;
-
-    g_seeBarriersJNI.frameOverlayDrawn = false;
-
-    bool enabled = g_guiExtrasSeeBarriers;
-    if (s_lastLoggedEnabled != (enabled ? 1 : 0)) {
-        DebugLog("See Barriers state enabled=%d inited=%d failed=%d",
-            enabled ? 1 : 0,
-            g_seeBarriersJNI.inited ? 1 : 0,
-            g_seeBarriersJNI.failed ? 1 : 0);
-        s_lastLoggedEnabled = enabled ? 1 : 0;
-    }
-    if (!enabled) {
-        if (!g_seeBarriersJNI.activeDamageMarkers.empty() || !g_seeBarriersJNI.chunkCaches.empty()) {
-            JNIEnv* env = GetJNIEnvForCurrentThread();
-            if (env) ResetSeeBarriersCache(env);
-        }
-        return;
-    }
-
-    if (!g_seeBarriersJNI.inited || g_seeBarriersJNI.failed || !g_seeBarriersJNI.chunkCacheReady) {
-        return;
-    }
-
-    JNIEnv* env = GetJNIEnvForCurrentThread();
-    if (!env) return;
-
-    jobject world = nullptr;
-    jobject player = nullptr;
-    if (!GetSeeBarriersWorldAndPlayer(env, world, player)) return;
-
-    EnsureSeeBarriersWorldCache(env, world);
-
-    ULONGLONG now = GetTickCount64();
-    if (g_seeBarriersJNI.lastChunkSyncMs == 0 ||
-        (now - g_seeBarriersJNI.lastChunkSyncMs) >= kSeeBarriersLoadedChunkSyncIntervalMs) {
-        SyncLoadedBarrierChunks(env, world, now);
-    }
-
-    double playerX = env->GetDoubleField(player, g_seeBarriersJNI.fEntityPosX);
-    double playerZ = env->GetDoubleField(player, g_seeBarriersJNI.fEntityPosZ);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(player);
-        env->DeleteLocalRef(world);
-        return;
-    }
-
-    int centerChunkX = FloorDiv16((int)std::floor(playerX));
-    int centerChunkZ = FloorDiv16((int)std::floor(playerZ));
-    ScanBarrierChunksBudgeted(env, world, centerChunkX, centerChunkZ, now);
-    RefreshSeeBarriersObservedStateModelOverrides(env, world, now);
-    RefreshSeeBarriersDamageMarkers(env, playerX, playerZ, now);
-
-    env->DeleteLocalRef(player);
-    env->DeleteLocalRef(world);
-}
-
 // =============================================================
 // OpenGL rendering
 // =============================================================
@@ -16550,11 +13919,10 @@ extern glOrtho_t o_glOrtho;
 
 void BeginOrtho(int w, int h) {
     glPushAttrib(GL_ALL_ATTRIB_BITS);
-    glPushMatrix();
     glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
     if (o_glOrtho) o_glOrtho(0, w, h, 0, -1, 1);
     else glOrtho(0, w, h, 0, -1, 1);
-    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
     glDisable(GL_DEPTH_TEST); glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING);
     glDisable(GL_ALPHA_TEST); glDisable(GL_FOG); glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -16652,323 +14020,6 @@ void DrawOverlay(int w, int h) {
     glFlush();
 }
 
-bool IsBarrierWithinConfiguredRange(const BarrierBlockPos& pos, int range, bool infiniteRange, double cameraX, double cameraZ) {
-    if (infiniteRange) return true;
-
-    double dx = ((double)pos.x + 0.5) - cameraX;
-    double dz = ((double)pos.z + 0.5) - cameraZ;
-    double radius = (double)range + 0.5;
-    return (dx * dx) + (dz * dz) <= radius * radius;
-}
-
-void EmitBarrierCubeQuads(float x, float y, float z) {
-    float x2 = x + 1.0f;
-    float y2 = y + 1.0f;
-    float z2 = z + 1.0f;
-
-    glVertex3f(x, y, z); glVertex3f(x2, y, z); glVertex3f(x2, y2, z); glVertex3f(x, y2, z);
-    glVertex3f(x2, y, z2); glVertex3f(x, y, z2); glVertex3f(x, y2, z2); glVertex3f(x2, y2, z2);
-    glVertex3f(x, y, z2); glVertex3f(x, y, z); glVertex3f(x, y2, z); glVertex3f(x, y2, z2);
-    glVertex3f(x2, y, z); glVertex3f(x2, y, z2); glVertex3f(x2, y2, z2); glVertex3f(x2, y2, z);
-    glVertex3f(x, y2, z); glVertex3f(x2, y2, z); glVertex3f(x2, y2, z2); glVertex3f(x, y2, z2);
-    glVertex3f(x, y, z2); glVertex3f(x2, y, z2); glVertex3f(x2, y, z); glVertex3f(x, y, z);
-}
-
-void EmitBarrierCubeLines(float x, float y, float z) {
-    float x2 = x + 1.0f;
-    float y2 = y + 1.0f;
-    float z2 = z + 1.0f;
-
-    glVertex3f(x, y, z); glVertex3f(x2, y, z);
-    glVertex3f(x2, y, z); glVertex3f(x2, y, z2);
-    glVertex3f(x2, y, z2); glVertex3f(x, y, z2);
-    glVertex3f(x, y, z2); glVertex3f(x, y, z);
-
-    glVertex3f(x, y2, z); glVertex3f(x2, y2, z);
-    glVertex3f(x2, y2, z); glVertex3f(x2, y2, z2);
-    glVertex3f(x2, y2, z2); glVertex3f(x, y2, z2);
-    glVertex3f(x, y2, z2); glVertex3f(x, y2, z);
-
-    glVertex3f(x, y, z); glVertex3f(x, y2, z);
-    glVertex3f(x2, y, z); glVertex3f(x2, y2, z);
-    glVertex3f(x2, y, z2); glVertex3f(x2, y2, z2);
-    glVertex3f(x, y, z2); glVertex3f(x, y2, z2);
-}
-
-volatile LONG g_seeBarriersCameraMatricesReady = 0;
-GLdouble g_seeBarriersProjectionMatrix[16] = {};
-GLdouble g_seeBarriersModelViewMatrix[16] = {};
-GLint g_seeBarriersViewport[4] = {};
-
-bool ProjectSeeBarriersWorldPointToScreen(double worldX, double worldY, double worldZ, float& screenX, float& screenY, double& depth) {
-    double eyeX =
-        (g_seeBarriersModelViewMatrix[0] * worldX) +
-        (g_seeBarriersModelViewMatrix[4] * worldY) +
-        (g_seeBarriersModelViewMatrix[8] * worldZ) +
-        g_seeBarriersModelViewMatrix[12];
-    double eyeY =
-        (g_seeBarriersModelViewMatrix[1] * worldX) +
-        (g_seeBarriersModelViewMatrix[5] * worldY) +
-        (g_seeBarriersModelViewMatrix[9] * worldZ) +
-        g_seeBarriersModelViewMatrix[13];
-    double eyeZ =
-        (g_seeBarriersModelViewMatrix[2] * worldX) +
-        (g_seeBarriersModelViewMatrix[6] * worldY) +
-        (g_seeBarriersModelViewMatrix[10] * worldZ) +
-        g_seeBarriersModelViewMatrix[14];
-    double eyeW =
-        (g_seeBarriersModelViewMatrix[3] * worldX) +
-        (g_seeBarriersModelViewMatrix[7] * worldY) +
-        (g_seeBarriersModelViewMatrix[11] * worldZ) +
-        g_seeBarriersModelViewMatrix[15];
-
-    double clipX =
-        (g_seeBarriersProjectionMatrix[0] * eyeX) +
-        (g_seeBarriersProjectionMatrix[4] * eyeY) +
-        (g_seeBarriersProjectionMatrix[8] * eyeZ) +
-        (g_seeBarriersProjectionMatrix[12] * eyeW);
-    double clipY =
-        (g_seeBarriersProjectionMatrix[1] * eyeX) +
-        (g_seeBarriersProjectionMatrix[5] * eyeY) +
-        (g_seeBarriersProjectionMatrix[9] * eyeZ) +
-        (g_seeBarriersProjectionMatrix[13] * eyeW);
-    double clipZ =
-        (g_seeBarriersProjectionMatrix[2] * eyeX) +
-        (g_seeBarriersProjectionMatrix[6] * eyeY) +
-        (g_seeBarriersProjectionMatrix[10] * eyeZ) +
-        (g_seeBarriersProjectionMatrix[14] * eyeW);
-    double clipW =
-        (g_seeBarriersProjectionMatrix[3] * eyeX) +
-        (g_seeBarriersProjectionMatrix[7] * eyeY) +
-        (g_seeBarriersProjectionMatrix[11] * eyeZ) +
-        (g_seeBarriersProjectionMatrix[15] * eyeW);
-    if (fabs(clipW) < 1e-6) return false;
-
-    double ndcX = clipX / clipW;
-    double ndcY = clipY / clipW;
-    double ndcZ = clipZ / clipW;
-    depth = ndcZ;
-
-    screenX = (float)(((ndcX * 0.5) + 0.5) * (double)g_seeBarriersViewport[2]);
-    screenY = (float)((1.0 - ((ndcY * 0.5) + 0.5)) * (double)g_seeBarriersViewport[3]);
-    return clipW > 0.0 &&
-        ndcX >= -1.0 && ndcX <= 1.0 &&
-        ndcY >= -1.0 && ndcY <= 1.0 &&
-        ndcZ >= -1.0 && ndcZ <= 1.0;
-}
-
-void DrawSeeBarriersProjectedMarker(float centerX, float centerY, float size) {
-    float half = size * 0.5f;
-    float left = centerX - half;
-    float top = centerY - half;
-    float thickness = size >= 10.0f ? 2.0f : 1.0f;
-
-    DrawRect(left, top, size, thickness, 0.43f, 0.29f, 0.14f, 0.92f);
-    DrawRect(left, top + size - thickness, size, thickness, 0.43f, 0.29f, 0.14f, 0.92f);
-    DrawRect(left, top, thickness, size, 0.43f, 0.29f, 0.14f, 0.92f);
-    DrawRect(left + size - thickness, top, thickness, size, 0.43f, 0.29f, 0.14f, 0.92f);
-
-    float inner = thickness + 1.0f;
-    if (size > (inner * 2.0f)) {
-        DrawRect(left + inner, top + inner, size - (inner * 2.0f), size - (inner * 2.0f), 0.62f, 0.43f, 0.22f, 0.24f);
-    }
-}
-
-void DrawSeeBarriersWorldOverlay() {
-    if (g_seeBarriersJNI.frameOverlayDrawn) return;
-
-    if (!g_guiExtrasSeeBarriers || !g_seeBarriersJNI.inited || g_seeBarriersJNI.failed ||
-        !g_seeBarriersJNI.chunkCacheReady || g_seeBarriersJNI.chunkCaches.empty()) {
-        return;
-    }
-    if (InterlockedCompareExchange(&g_seeBarriersCameraMatricesReady, 0, 0) == 0) return;
-    g_seeBarriersJNI.frameOverlayDrawn = true;
-
-    JNIEnv* env = GetJNIEnvForCurrentThread();
-    if (env) {
-        UpdateSeeBarriersRenderCameraFromRenderManager(env);
-    }
-
-    int range = NormalizeSeeBarriersRange(g_guiSeeBarriersRange);
-    bool infiniteRange = IsSeeBarriersRangeInfinite(range);
-    int style = NormalizeSeeBarriersStyle(g_guiSeeBarriersStyle);
-    bool drawSolid = style == SEE_BARRIERS_STYLE_BOX_OUTLINE;
-
-    struct BarrierOverlayItem {
-        BarrierBlockPos pos;
-        double distanceSq = 0.0;
-    };
-    struct BarrierProjectedMarker {
-        float x = 0.0f;
-        float y = 0.0f;
-        float size = 0.0f;
-    };
-
-    std::vector<BarrierOverlayItem> items;
-    std::vector<BarrierProjectedMarker> projectedMarkers;
-    size_t candidateCount = 0;
-    for (const auto& entry : g_seeBarriersJNI.chunkCaches) {
-        for (const BarrierBlockPos& pos : entry.second.barriers) {
-            double dx = ((double)pos.x + 0.5) - g_seeBarriersJNI.renderCameraX;
-            double dy = ((double)pos.y + 0.5) - g_seeBarriersJNI.renderCameraY;
-            double dz = ((double)pos.z + 0.5) - g_seeBarriersJNI.renderCameraZ;
-            double horizontalDistanceSq = (dx * dx) + (dz * dz);
-            if (!infiniteRange) {
-                double radius = (double)range + 0.5;
-                if (horizontalDistanceSq > radius * radius) continue;
-            }
-
-            ++candidateCount;
-            BarrierOverlayItem item;
-            item.pos = pos;
-            item.distanceSq = horizontalDistanceSq + (dy * dy);
-            items.push_back(item);
-        }
-    }
-
-    bool capped = items.size() > (size_t)kSeeBarriersOverlayMaxBlocks;
-    if (capped) {
-        std::nth_element(
-            items.begin(),
-            items.begin() + kSeeBarriersOverlayMaxBlocks,
-            items.end(),
-            [](const BarrierOverlayItem& a, const BarrierOverlayItem& b) {
-                return a.distanceSq < b.distanceSq;
-            });
-        items.resize((size_t)kSeeBarriersOverlayMaxBlocks);
-    }
-
-    if (items.empty()) return;
-
-    size_t projectedMarkerReserve = items.size();
-    if (projectedMarkerReserve > 128) projectedMarkerReserve = 128;
-    projectedMarkers.reserve(projectedMarkerReserve);
-    unsigned int projectedVisibleCount = 0;
-    bool sampleProjectedValid = false;
-    bool sampleProjectedVisible = false;
-    float sampleProjectedX = 0.0f;
-    float sampleProjectedY = 0.0f;
-    double sampleProjectedDepth = 0.0;
-    for (const BarrierOverlayItem& item : items) {
-        float screenX = 0.0f;
-        float screenY = 0.0f;
-        double depth = 0.0;
-        bool projectedVisible = ProjectSeeBarriersWorldPointToScreen(
-            (double)item.pos.x + 0.5,
-            (double)item.pos.y + 0.5,
-            (double)item.pos.z + 0.5,
-            screenX,
-            screenY,
-            depth);
-        if (!sampleProjectedValid) {
-            sampleProjectedValid = true;
-            sampleProjectedVisible = projectedVisible;
-            sampleProjectedX = screenX;
-            sampleProjectedY = screenY;
-            sampleProjectedDepth = depth;
-        }
-        if (!projectedVisible) continue;
-
-        ++projectedVisibleCount;
-        if (projectedMarkers.size() >= 128) continue;
-
-        double distanceSq = item.distanceSq;
-        if (distanceSq < 1.0) distanceSq = 1.0;
-        double distance = sqrt(distanceSq);
-        float size = (float)(18.0 / distance);
-        if (size < 5.0f) size = 5.0f;
-        if (size > 14.0f) size = 14.0f;
-
-        BarrierProjectedMarker marker = {};
-        marker.x = screenX;
-        marker.y = screenY;
-        marker.size = size;
-        projectedMarkers.push_back(marker);
-    }
-
-    GLint oldMatrixMode = GL_MODELVIEW;
-    glGetIntegerv(GL_MATRIX_MODE, &oldMatrixMode);
-
-    glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_LINE_BIT | GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT | GL_VIEWPORT_BIT | GL_SCISSOR_BIT | GL_STENCIL_BUFFER_BIT | GL_POLYGON_BIT);
-    glViewport(g_seeBarriersViewport[0], g_seeBarriersViewport[1], g_seeBarriersViewport[2], g_seeBarriersViewport[3]);
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadMatrixd(g_seeBarriersProjectionMatrix);
-    glMatrixMode(GL_MODELVIEW);
-    glPushMatrix();
-    glLoadMatrixd(g_seeBarriersModelViewMatrix);
-
-    glDisable(GL_DEPTH_TEST);
-    glDepthMask(GL_FALSE);
-    glDisable(GL_TEXTURE_2D);
-    glDisable(GL_LIGHTING);
-    glDisable(GL_CULL_FACE);
-    glDisable(GL_ALPHA_TEST);
-    glDisable(GL_FOG);
-    glDisable(GL_SCISSOR_TEST);
-    glDisable(GL_STENCIL_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-
-    if (drawSolid) {
-        glColor4f(0.43f, 0.29f, 0.14f, 0.34f);
-        glBegin(GL_QUADS);
-        for (const BarrierOverlayItem& item : items) {
-            const BarrierBlockPos& pos = item.pos;
-            EmitBarrierCubeQuads(
-                (float)pos.x,
-                (float)pos.y,
-                (float)pos.z);
-        }
-        glEnd();
-    }
-
-    glLineWidth(1.8f);
-    glColor4f(0.28f, 0.18f, 0.08f, 0.95f);
-    glBegin(GL_LINES);
-    for (const BarrierOverlayItem& item : items) {
-        const BarrierBlockPos& pos = item.pos;
-        EmitBarrierCubeLines(
-            (float)pos.x,
-            (float)pos.y,
-            (float)pos.z);
-    }
-    glEnd();
-
-    static ULONGLONG s_lastOverlayLogMs = 0;
-    ULONGLONG now = GetTickCount64();
-    if ((now - s_lastOverlayLogMs) >= 2000) {
-        DebugLog("See Barriers overlay drawn=%u candidates=%u capped=%d range=%s matricesReady=%d projected=%u sampleVisible=%d sampleScreen=%.1f,%.1f sampleDepth=%.3f",
-            (unsigned int)items.size(),
-            (unsigned int)candidateCount,
-            capped ? 1 : 0,
-            FormatSeeBarriersRangeLabel(g_guiSeeBarriersRange).c_str(),
-            InterlockedCompareExchange(&g_seeBarriersCameraMatricesReady, 0, 0) != 0 ? 1 : 0,
-            projectedVisibleCount,
-            sampleProjectedVisible ? 1 : 0,
-            sampleProjectedX,
-            sampleProjectedY,
-            sampleProjectedDepth);
-        s_lastOverlayLogMs = now;
-    }
-
-    glPopMatrix();
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(oldMatrixMode);
-    glPopAttrib();
-
-    if (!projectedMarkers.empty() && g_seeBarriersViewport[2] > 0 && g_seeBarriersViewport[3] > 0) {
-        BeginOrtho(g_seeBarriersViewport[2], g_seeBarriersViewport[3]);
-        for (const BarrierProjectedMarker& marker : projectedMarkers) {
-            DrawSeeBarriersProjectedMarker(marker.x, marker.y, marker.size);
-        }
-        EndOrtho();
-    }
-}
-
 bool IsLikelyHudOrthoProjection(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble zNear, GLdouble zFar) {
     const GLdouble epsilon = 0.01;
     return fabs(left) <= epsilon &&
@@ -16988,34 +14039,13 @@ SwapBuffers_t o_SwapBuffers = nullptr;
 typedef void (APIENTRY* glClear_t)(GLbitfield);
 glClear_t o_glClear = nullptr;
 glOrtho_t o_glOrtho = nullptr;
-typedef void (APIENTRY* glTranslatef_t)(GLfloat, GLfloat, GLfloat);
-glTranslatef_t o_glTranslatef = nullptr;
 typedef void (APIENTRY* glBlendFuncSeparate_t)(GLenum, GLenum, GLenum, GLenum);
 glBlendFuncSeparate_t g_realGlBlendFuncSeparateProc = nullptr;
 WNDPROC o_wndProc = nullptr;
 volatile LONG g_timerCaptureFrameDrawn = 0;
-volatile LONG g_seeBarriersCameraPitchSeen = 0;
-volatile LONG g_seeBarriersCameraYawSeen = 0;
 
 LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 void EnsureWndProcHooked(HWND candidateHwnd = nullptr);
-
-void CaptureSeeBarriersCameraMatrices() {
-    if (!g_guiExtrasSeeBarriers || !g_seeBarriersJNI.inited || g_seeBarriersJNI.failed) return;
-    if (InterlockedCompareExchange(&g_seeBarriersCameraMatricesReady, 0, 0) != 0) return;
-
-    GLint viewport[4] = {};
-    glGetIntegerv(GL_VIEWPORT, viewport);
-    if (viewport[2] <= 0 || viewport[3] <= 0) return;
-
-    glGetDoublev(GL_PROJECTION_MATRIX, g_seeBarriersProjectionMatrix);
-    glGetDoublev(GL_MODELVIEW_MATRIX, g_seeBarriersModelViewMatrix);
-    g_seeBarriersViewport[0] = viewport[0];
-    g_seeBarriersViewport[1] = viewport[1];
-    g_seeBarriersViewport[2] = viewport[2];
-    g_seeBarriersViewport[3] = viewport[3];
-    InterlockedExchange(&g_seeBarriersCameraMatricesReady, 1);
-}
 
 void ResetBlendFuncSeparatePatchState() {
     if (g_realGlBlendFuncSeparateProc || g_glBlendPatchedContext) {
@@ -17056,6 +14086,82 @@ void APIENTRY hk_glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdoubl
     if (viewport[2] <= 0 || viewport[3] <= 0) return;
 
     DrawOverlay(viewport[2], viewport[3]);
+}
+
+struct BlendFuncSeparatePatch {
+    jobject capabilities;
+    jlong originalProc;
+};
+std::mutex g_blendFuncSeparatePatchMutex;
+std::vector<BlendFuncSeparatePatch> g_blendFuncSeparatePatches;
+
+bool PatchBlendFuncSeparateCapabilities(JNIEnv* env, jobject capabilities) {
+    std::lock_guard<std::mutex> lock(g_blendFuncSeparatePatchMutex);
+    // Serialize against restoration, including an already-entered render hook.
+    if (IsModuleUnloadRequested()) return false;
+    jlong currentProc = env->GetLongField(capabilities, g_glBlendFuncSeparateField);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    const jlong hookProc = (jlong)(intptr_t)&hk_glBlendFuncSeparate;
+    BlendFuncSeparatePatch* saved = nullptr;
+    for (auto& patch : g_blendFuncSeparatePatches) {
+        if (env->IsSameObject(capabilities, patch.capabilities)) {
+            saved = &patch;
+            break;
+        }
+    }
+    if (currentProc == hookProc) {
+        if (!saved) return false;
+        // Recover the original after a context switch resets the fast path.
+        g_realGlBlendFuncSeparateProc = reinterpret_cast<glBlendFuncSeparate_t>((intptr_t)saved->originalProc);
+        return true;
+    }
+    if (!currentProc) return false;
+    if (!saved) {
+        jobject reference = env->NewGlobalRef(capabilities);
+        if (!reference || env->ExceptionCheck()) {
+            env->ExceptionClear();
+            if (reference) env->DeleteGlobalRef(reference);
+            return false;
+        }
+        g_blendFuncSeparatePatches.push_back({ reference, currentProc });
+        saved = &g_blendFuncSeparatePatches.back();
+    }
+    saved->originalProc = currentProc;
+    g_realGlBlendFuncSeparateProc = reinterpret_cast<glBlendFuncSeparate_t>((intptr_t)currentProc);
+    env->SetLongField(capabilities, g_glBlendFuncSeparateField, hookProc);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
+bool RestoreBlendFuncSeparatePatches(JNIEnv* env) {
+    std::lock_guard<std::mutex> lock(g_blendFuncSeparatePatchMutex);
+    if (g_blendFuncSeparatePatches.empty()) return true;
+    if (!env) return false;
+    const jlong hookProc = (jlong)(intptr_t)&hk_glBlendFuncSeparate;
+    bool restored = true;
+    for (auto it = g_blendFuncSeparatePatches.begin(); it != g_blendFuncSeparatePatches.end();) {
+        jlong currentProc = env->GetLongField(it->capabilities, g_glBlendFuncSeparateField);
+        if (!env->ExceptionCheck() && currentProc == hookProc) {
+            env->SetLongField(it->capabilities, g_glBlendFuncSeparateField, it->originalProc);
+        }
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            restored = false;
+            ++it;
+        }
+        else {
+            env->DeleteGlobalRef(it->capabilities);
+            it = g_blendFuncSeparatePatches.erase(it);
+        }
+    }
+    DebugLog("Crosshair blend pointers restored=%d", restored ? 1 : 0);
+    return restored;
 }
 
 void EnsureBlendFuncSeparatePatched() {
@@ -17113,29 +14219,9 @@ void EnsureBlendFuncSeparatePatched() {
             return;
         }
 
-        jlong procValue = env->GetLongField(capabilities, g_glBlendFuncSeparateField);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
+        if (!PatchBlendFuncSeparateCapabilities(env, capabilities)) {
             env->DeleteLocalRef(capabilities);
-            DebugLog("EnsureBlendFuncSeparatePatched skip: GetLongField failed currentContext=%p", currentContext);
             return;
-        }
-
-        void* hookProc = reinterpret_cast<void*>(&hk_glBlendFuncSeparate);
-        void* currentProc = reinterpret_cast<void*>((intptr_t)procValue);
-        if (currentProc != hookProc) {
-            if (currentProc) g_realGlBlendFuncSeparateProc = reinterpret_cast<glBlendFuncSeparate_t>((intptr_t)procValue);
-            env->SetLongField(capabilities, g_glBlendFuncSeparateField, (jlong)(intptr_t)hookProc);
-            if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-                env->DeleteLocalRef(capabilities);
-                DebugLog("EnsureBlendFuncSeparatePatched skip: SetLongField failed currentContext=%p currentProc=%p", currentContext, currentProc);
-                return;
-            }
-            DebugLog("EnsureBlendFuncSeparatePatched patched currentContext=%p currentProc=%p realProc=%p", currentContext, currentProc, g_realGlBlendFuncSeparateProc);
-        }
-        else if (!g_realGlBlendFuncSeparateProc) {
-            DebugLog("EnsureBlendFuncSeparatePatched found hook already installed but real proc missing currentContext=%p", currentContext);
         }
 
         g_glBlendPatchedContext = currentContext;
@@ -17198,10 +14284,6 @@ void SetOverlayWindowAppId(HWND hwnd) {
     }
 
     propertyStore->Release();
-}
-
-void APIENTRY hk_glTranslatef(GLfloat x, GLfloat y, GLfloat z) {
-    o_glTranslatef(x, y, z);
 }
 
 void APIENTRY hk_glClear(GLbitfield mask) {
@@ -17586,6 +14668,8 @@ static RECT g_timerLockToggleRect = {};
 static RECT g_timerNametagToggleRect = {};
 static RECT g_timerNametagPrefixRect = {};
 static RECT g_timerNametagSuffixRect = {};
+static RECT g_timerPrefixBeforeTntRect = {};
+static RECT g_timerPrefixAfterTntRect = {};
 static RECT g_timerCaptureToggleRect = {};
 static RECT g_timerModeOverlayRect = {};
 static RECT g_timerModeCrosshairRect = {};
@@ -17610,6 +14694,8 @@ static RECT g_publicHelpersExpandRect = {};
 static RECT g_publicWinsToggleRect = {};
 static RECT g_publicWinsPrefixRect = {};
 static RECT g_publicWinsSuffixRect = {};
+static RECT g_publicWinsPrefixBeforeTntRect = {};
+static RECT g_publicWinsPrefixAfterTntRect = {};
 static RECT g_publicWinsSpaceRect = {};
 static RECT g_extrasCard = {};
 static RECT g_extrasExpandRect = {};
@@ -18551,111 +15637,6 @@ void DrawCosmicPlanets(HDC hdc, const RECT& rect, float seconds) {
     DrawSmoothCosmicPlanet(graphics, 1, framePosition + 4.0f, ringedDestination);
 }
 
-void DrawNeonCityAnimation(HDC hdc, const RECT& rect, float seconds) {
-    int width = rect.right - rect.left;
-    int height = rect.bottom - rect.top;
-    if (width <= 0 || height <= 0) return;
-
-    const GuiPalette& palette = GetGuiPalette();
-    HBRUSH brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
-    COLORREF oldColor = SetDCBrushColor(hdc, palette.accentAlt);
-    for (int i = 0; i < 44; ++i) {
-        unsigned int hash = HashCosmicPixel(i, 91, 211u);
-        int x = rect.left + (int)(hash % (unsigned int)width);
-        float speed = 7.0f + (float)((hash >> 9) % 7u);
-        int y = rect.top + WrapCosmicCoordinate((int)((hash >> 16) % (unsigned int)height) + (int)(seconds * speed), height);
-        int length = 4 + (int)((hash >> 25) % 7u);
-        COLORREF raw = (hash & 1u) ? palette.accentAlt : palette.accent;
-        SetDCBrushColor(hdc, BlendGuiColor(palette.bg, raw, 0.44f + (float)(hash & 3u) * 0.10f));
-        RECT drop = { x, y, x + 1, y + length };
-        FillRect(hdc, &drop, brush);
-    }
-
-    // Slow hover traffic gives the skyline depth without moving the artwork.
-    for (int i = 0; i < 7; ++i) {
-        unsigned int hash = HashCosmicPixel(i, 317, 719u);
-        int laneY = rect.top + height / 5 + (int)((hash >> 11) % (unsigned int)max(1, height * 3 / 5));
-        float speed = 10.0f + (float)((hash >> 23) % 9u);
-        int travel = width + 80;
-        int localX = WrapCosmicCoordinate((int)((hash & 2047u) + seconds * speed), travel) - 40;
-        bool reverse = (hash & 1u) != 0u;
-        int x = reverse ? rect.right - localX : rect.left + localX;
-        COLORREF carColor = (hash & 2u) ? palette.accent : palette.accentAlt;
-        SetDCBrushColor(hdc, BlendGuiColor(palette.bg, carColor, 0.82f));
-        RECT trail = reverse ? RECT{ x, laneY, x + 22, laneY + 1 } : RECT{ x - 22, laneY, x, laneY + 1 };
-        FillRect(hdc, &trail, brush);
-        SetDCBrushColor(hdc, carColor);
-        RECT car = reverse ? RECT{ x - 8, laneY - 1, x, laneY + 3 } : RECT{ x, laneY - 1, x + 8, laneY + 3 };
-        FillRect(hdc, &car, brush);
-    }
-
-    for (int i = 0; i < 8; ++i) {
-        unsigned int hash = HashCosmicPixel(i, 349, 733u);
-        float pulse = 0.35f + 0.55f * (0.5f + 0.5f * std::sin(seconds * 0.72f + (float)i * 1.31f));
-        int x = rect.left + 28 + (int)(hash % (unsigned int)max(1, width - 56));
-        int y = rect.top + height / 4 + (int)((hash >> 18) % (unsigned int)max(1, height / 2));
-        SetDCBrushColor(hdc, BlendGuiColor(palette.bg, (i & 1) ? palette.accent : palette.accentAlt, pulse));
-        RECT sign = { x, y, x + 3 + (int)(hash & 7u), y + 2 };
-        FillRect(hdc, &sign, brush);
-    }
-    SetDCBrushColor(hdc, oldColor);
-}
-
-void DrawEnchantedForestAnimation(HDC hdc, const RECT& rect, float seconds) {
-    int width = rect.right - rect.left;
-    int height = rect.bottom - rect.top;
-    if (width <= 0 || height <= 0) return;
-
-    const GuiPalette& palette = GetGuiPalette();
-    HBRUSH brush = static_cast<HBRUSH>(GetStockObject(DC_BRUSH));
-    COLORREF oldColor = SetDCBrushColor(hdc, palette.accent);
-    for (int i = 0; i < 30; ++i) {
-        unsigned int hash = HashCosmicPixel(i, 137, 307u);
-        float phase = (float)(hash & 1023u) * 0.0061359f;
-        int baseX = (int)((hash >> 10) % (unsigned int)width);
-        int baseY = (int)((hash >> 20) % (unsigned int)height);
-        int x = rect.left + WrapCosmicCoordinate(baseX + (int)(std::sin(seconds * 0.22f + phase) * 12.0f), width);
-        int y = rect.top + WrapCosmicCoordinate(baseY + (int)(std::cos(seconds * 0.17f + phase * 1.7f) * 8.0f), height);
-        float pulse = 0.40f + 0.50f * (0.5f + 0.5f * std::sin(seconds * 0.9f + phase * 2.0f));
-        COLORREF color = BlendGuiColor(palette.bg, (hash & 3u) ? palette.accent : palette.accentAlt, pulse);
-        SetDCBrushColor(hdc, color);
-        int size = pulse > 0.72f ? 2 : 1;
-        RECT glow = { x, y, x + size, y + size };
-        FillRect(hdc, &glow, brush);
-        if (pulse > 0.83f) {
-            RECT cross = { x - 2, y, x + 4, y + 1 };
-            FillRect(hdc, &cross, brush);
-        }
-    }
-
-    // Leaves drift across the scene on separate paths while the fireflies hover.
-    for (int i = 0; i < 18; ++i) {
-        unsigned int hash = HashCosmicPixel(i, 383, 809u);
-        float phase = (float)(hash & 1023u) * 0.0061359f;
-        float speed = 3.0f + (float)((hash >> 12) % 6u);
-        int x = rect.left + WrapCosmicCoordinate((int)((hash >> 19) % (unsigned int)width) + (int)(seconds * speed), width);
-        int baseY = rect.top + (int)((hash >> 4) % (unsigned int)height);
-        int y = baseY + (int)(std::sin(seconds * 0.28f + phase) * 13.0f);
-        COLORREF leafColor = (hash & 1u) ? palette.accent : ((hash & 2u) ? palette.accentAlt : palette.starPink);
-        SetDCBrushColor(hdc, BlendGuiColor(palette.bg, leafColor, 0.58f));
-        RECT leaf = { x, y, x + ((hash & 4u) ? 3 : 2), y + 2 };
-        FillRect(hdc, &leaf, brush);
-    }
-
-    // Broken pixel wisps read as moonlit mist but stay extremely cheap to draw.
-    for (int band = 0; band < 3; ++band) {
-        int bandY = rect.top + height * (52 + band * 13) / 100;
-        int offset = WrapCosmicCoordinate((int)(seconds * (3.0f + band)) + band * 97, width + 150) - 150;
-        SetDCBrushColor(hdc, BlendGuiColor(palette.bg, palette.accentAlt, 0.24f + band * 0.05f));
-        for (int segment = 0; segment < 12; ++segment) {
-            int x = rect.left + offset + segment * 42;
-            RECT mist = { x, bandY + (segment & 1), x + 24, bandY + 2 + (segment & 1) };
-            FillRect(hdc, &mist, brush);
-        }
-    }
-    SetDCBrushColor(hdc, oldColor);
-}
-
 void DrawInfernoAnimation(HDC hdc, const RECT& rect, float seconds) {
     int width = rect.right - rect.left;
     int height = rect.bottom - rect.top;
@@ -19284,6 +16265,17 @@ int GetPerspectiveExpandedHeight() {
     return kGuiPerspectiveExpandedHeight;
 }
 
+int GetTimerExpandedHeight() {
+    return kGuiTimerExpandedHeight +
+        (NormalizeTimerNametagPosition(g_guiTimerNametagPosition) ==
+            TIMER_NAMETAG_POSITION_PREFIX ? 40 : 0);
+}
+
+int GetPublicHelpersExpandedHeight() {
+    return kGuiPublicHelpersExpandedHeight +
+        (g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_PREFIX ? 40 : 0);
+}
+
 void EnsureGuiCardAnimationInitialized(GuiCardAnimState& state, int expandedHeight) {
     if (expandedHeight < kGuiCardHeaderHeight) expandedHeight = kGuiCardHeaderHeight;
     if (state.currentHeight <= 0.0f) state.currentHeight = (float)kGuiCardHeaderHeight;
@@ -19326,9 +16318,9 @@ bool UpdateGuiAnimations() {
 
     bool dirty = false;
     dirty |= UpdateGuiCardAnimation(g_perspectiveCardAnim, GetPerspectiveExpandedHeight(), deltaSeconds);
-    dirty |= UpdateGuiCardAnimation(g_timerCardAnim, kGuiTimerExpandedHeight, deltaSeconds);
+    dirty |= UpdateGuiCardAnimation(g_timerCardAnim, GetTimerExpandedHeight(), deltaSeconds);
     dirty |= UpdateGuiCardAnimation(g_speedSlownessCardAnim, kGuiSpeedExpandedHeight, deltaSeconds);
-    dirty |= UpdateGuiCardAnimation(g_publicHelpersCardAnim, kGuiPublicHelpersExpandedHeight, deltaSeconds);
+    dirty |= UpdateGuiCardAnimation(g_publicHelpersCardAnim, GetPublicHelpersExpandedHeight(), deltaSeconds);
     dirty |= UpdateGuiCardAnimation(g_extrasCardAnim, kGuiExtrasExpandedHeight, deltaSeconds);
     dirty |= UpdateGuiCardAnimation(g_mutedUtilitiesCardAnim, kGuiMutedUtilitiesExpandedHeight, deltaSeconds);
     return dirty;
@@ -19360,9 +16352,9 @@ void LayoutGuiControls(int clientW, int clientH) {
     g_headerThemeRect = MakeRectWH(g_headerMinimizeRect.left - 10 - 88, 16, 88, kGuiWindowButtonH);
 
     EnsureGuiCardAnimationInitialized(g_perspectiveCardAnim, GetPerspectiveExpandedHeight());
-    EnsureGuiCardAnimationInitialized(g_timerCardAnim, kGuiTimerExpandedHeight);
+    EnsureGuiCardAnimationInitialized(g_timerCardAnim, GetTimerExpandedHeight());
     EnsureGuiCardAnimationInitialized(g_speedSlownessCardAnim, kGuiSpeedExpandedHeight);
-    EnsureGuiCardAnimationInitialized(g_publicHelpersCardAnim, kGuiPublicHelpersExpandedHeight);
+    EnsureGuiCardAnimationInitialized(g_publicHelpersCardAnim, GetPublicHelpersExpandedHeight());
     EnsureGuiCardAnimationInitialized(g_extrasCardAnim, kGuiExtrasExpandedHeight);
     EnsureGuiCardAnimationInitialized(g_mutedUtilitiesCardAnim, kGuiMutedUtilitiesExpandedHeight);
 
@@ -19383,7 +16375,7 @@ void LayoutGuiControls(int clientW, int clientH) {
 
     y += perspectiveHeight + kGuiCardGap;
 
-    int timerHeight = GetAnimatedCardHeight(g_timerCardAnim, kGuiTimerExpandedHeight);
+    int timerHeight = GetAnimatedCardHeight(g_timerCardAnim, GetTimerExpandedHeight());
     g_timerCard = MakeRectWH(margin, y, cardW, timerHeight);
     g_timerExpandRect = MakeRectWH(g_timerCard.right - headerRightPad - expandW, g_timerCard.top + expandTop, expandW, expandH);
     g_timerShowToggleRect = MakeRectWH(g_timerExpandRect.left - headerControlGap - toggleW, g_timerCard.top + toggleTop, toggleW, toggleH);
@@ -19396,11 +16388,27 @@ void LayoutGuiControls(int clientW, int clientH) {
     g_timerNametagToggleRect = MakeRectWH(g_timerCard.right - 64, g_timerCard.top + 172 + legacyBodyShift, 46, 24);
     g_timerNametagSuffixRect = MakeRectWH(g_timerNametagToggleRect.left - 10 - 64, g_timerNametagToggleRect.top - 3, 64, 30);
     g_timerNametagPrefixRect = MakeRectWH(g_timerNametagSuffixRect.left - 6 - 64, g_timerNametagToggleRect.top - 3, 64, 30);
-    g_timerDefaultScoreboardToggleRect = MakeRectWH(g_timerCard.right - 64, g_timerCard.top + 206 + legacyBodyShift, 46, 24);
-    g_timerCaptureToggleRect = MakeRectWH(g_timerCard.right - 64, g_timerCard.top + 240 + legacyBodyShift, 46, 24);
-    g_timerLockToggleRect = MakeRectWH(g_timerCard.right - 64, g_timerCard.top + 274 + legacyBodyShift, 46, 24);
-    g_timerScaleTrackRect = MakeRectWH(g_timerCard.left + 18, g_timerCard.top + 324 + legacyBodyShift, cardW - 36, 8);
-    g_timerScaleHitRect = MakeRectWH(g_timerCard.left + 18, g_timerCard.top + 312 + legacyBodyShift, cardW - 36, 28);
+    const bool timerPrefixSelected = NormalizeTimerNametagPosition(
+        g_guiTimerNametagPosition) == TIMER_NAMETAG_POSITION_PREFIX;
+    const int timerPrefixRowOffset = timerPrefixSelected ? 40 : 0;
+    if (timerPrefixSelected) {
+        const int placementW = 92;
+        int placementX = g_timerCard.right - 18 - (placementW * 2) - segGap;
+        g_timerPrefixBeforeTntRect = MakeRectWH(
+            placementX, g_timerCard.top + 206 + legacyBodyShift, placementW, 30);
+        g_timerPrefixAfterTntRect = MakeRectWH(
+            g_timerPrefixBeforeTntRect.right + segGap,
+            g_timerPrefixBeforeTntRect.top, placementW, 30);
+    }
+    else {
+        g_timerPrefixBeforeTntRect = {};
+        g_timerPrefixAfterTntRect = {};
+    }
+    g_timerDefaultScoreboardToggleRect = MakeRectWH(g_timerCard.right - 64, g_timerCard.top + 206 + legacyBodyShift + timerPrefixRowOffset, 46, 24);
+    g_timerCaptureToggleRect = MakeRectWH(g_timerCard.right - 64, g_timerCard.top + 240 + legacyBodyShift + timerPrefixRowOffset, 46, 24);
+    g_timerLockToggleRect = MakeRectWH(g_timerCard.right - 64, g_timerCard.top + 274 + legacyBodyShift + timerPrefixRowOffset, 46, 24);
+    g_timerScaleTrackRect = MakeRectWH(g_timerCard.left + 18, g_timerCard.top + 324 + legacyBodyShift + timerPrefixRowOffset, cardW - 36, 8);
+    g_timerScaleHitRect = MakeRectWH(g_timerCard.left + 18, g_timerCard.top + 312 + legacyBodyShift + timerPrefixRowOffset, cardW - 36, 28);
 
     y += timerHeight + kGuiCardGap;
 
@@ -19422,7 +16430,7 @@ void LayoutGuiControls(int clientW, int clientH) {
 
     y += speedHeight + kGuiCardGap;
 
-    int publicHelpersHeight = GetAnimatedCardHeight(g_publicHelpersCardAnim, kGuiPublicHelpersExpandedHeight);
+    int publicHelpersHeight = GetAnimatedCardHeight(g_publicHelpersCardAnim, GetPublicHelpersExpandedHeight());
     g_publicHelpersCard = MakeRectWH(margin, y, cardW, publicHelpersHeight);
     g_publicHelpersExpandRect = MakeRectWH(g_publicHelpersCard.right - headerRightPad - expandW, g_publicHelpersCard.top + expandTop, expandW, expandH);
     g_publicWinsToggleRect = MakeRectWH(g_publicHelpersCard.right - 64, g_publicHelpersCard.top + 68, 46, 24);
@@ -19432,7 +16440,26 @@ void LayoutGuiControls(int clientW, int clientH) {
         g_publicWinsPrefixRect = MakeRectWH(positionX, g_publicHelpersCard.top + 102, positionW, 30);
         g_publicWinsSuffixRect = MakeRectWH(g_publicWinsPrefixRect.right + segGap, g_publicHelpersCard.top + 102, positionW, 30);
     }
-    g_publicWinsSpaceRect = MakeRectWH(g_publicHelpersCard.right - 40, g_publicHelpersCard.top + 145, 22, 22);
+    const bool publicWinsPrefixSelected =
+        g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_PREFIX;
+    if (publicWinsPrefixSelected) {
+        const int placementW = 92;
+        int placementX = g_publicHelpersCard.right - 18 - (placementW * 2) - segGap;
+        g_publicWinsPrefixBeforeTntRect = MakeRectWH(
+            placementX, g_publicHelpersCard.top + 144, placementW, 30);
+        g_publicWinsPrefixAfterTntRect = MakeRectWH(
+            g_publicWinsPrefixBeforeTntRect.right + segGap,
+            g_publicWinsPrefixBeforeTntRect.top, placementW, 30);
+    }
+    else {
+        g_publicWinsPrefixBeforeTntRect = {};
+        g_publicWinsPrefixAfterTntRect = {};
+    }
+    g_publicWinsSpaceRect = MakeRectWH(
+        g_publicHelpersCard.right - 40,
+        g_publicHelpersCard.top + 145 + (publicWinsPrefixSelected ? 40 : 0),
+        22,
+        22);
 
     y += publicHelpersHeight + kGuiCardGap;
 
@@ -20040,7 +17067,7 @@ void DrawThemePickerPage(HDC hdc, const RECT& clientRect, HFONT sectionFont, HFO
     SelectObject(hdc, metaFont);
     DrawTextLine(hdc, MakeRectWH(g_themePickerBackRect.right + 14, g_themePickerCard.top + 43,
         g_themePickerCard.right - g_themePickerBackRect.right - 32, 18),
-        "Choose a pixel-art style", kGuiMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        "Choose a pixel art style", kGuiMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     for (int theme = 0; theme < GUI_THEME_COUNT; ++theme) {
         const RECT& option = g_themeOptionRects[theme];
@@ -20765,6 +17792,15 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 DrawTextLine(memDC, MakeRectWH(g_timerCard.left + 18, g_timerCard.top + 59 + legacyBodyShift, 140, 16), "Placement", kGuiMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 DrawTextLine(memDC, MakeRectWH(g_timerCard.left + 18, g_timerCard.top + 101 + legacyBodyShift, 140, 16), "Decimals", kGuiMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 DrawTextLine(memDC, MakeRectWH(g_timerCard.left + 18, g_timerNametagToggleRect.top - 2, 180, 16), "Show in nametags", kGuiText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                if (NormalizeTimerNametagPosition(g_guiTimerNametagPosition) ==
+                    TIMER_NAMETAG_POSITION_PREFIX) {
+                    DrawTextLine(memDC, MakeRectWH(
+                        g_timerCard.left + 18,
+                        g_timerPrefixBeforeTntRect.top + 7,
+                        150,
+                        16), "Prefix relative to [IT]", kGuiMuted,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                }
                 DrawTextLine(memDC, MakeRectWH(g_timerCard.left + 18, g_timerDefaultScoreboardToggleRect.top - 2, 210, 16), "Edit Default Scoreboard", NormalizeTimerDecimalPlaces(g_guiTimerDecimalPlaces) > 0 ? kGuiText : kGuiMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 DrawTextLine(memDC, MakeRectWH(g_timerCard.left + 18, g_timerCaptureToggleRect.top - 2, 180, 16), "OBS and Screenshots", kGuiText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 DrawTextLine(memDC, MakeRectWH(g_timerCard.left + 18, g_timerLockToggleRect.top - 2, 180, 16), "Lock free placement", kGuiText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -20780,6 +17816,17 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 DrawButtonChip(memDC, g_timerNumberColourButtonRect, "Number Colour >", false, true);
                 DrawButtonChip(memDC, g_timerNametagPrefixRect, "Prefix", NormalizeTimerNametagPosition(g_guiTimerNametagPosition) == TIMER_NAMETAG_POSITION_PREFIX, false);
                 DrawButtonChip(memDC, g_timerNametagSuffixRect, "Suffix", NormalizeTimerNametagPosition(g_guiTimerNametagPosition) == TIMER_NAMETAG_POSITION_SUFFIX, true);
+                if (NormalizeTimerNametagPosition(g_guiTimerNametagPosition) ==
+                    TIMER_NAMETAG_POSITION_PREFIX) {
+                    DrawButtonChip(memDC, g_timerPrefixBeforeTntRect, "Before [IT]",
+                        NormalizePrefixTntTagPlacement(g_guiTimerPrefixTntTagPlacement) ==
+                            PREFIX_TNT_TAG_PLACEMENT_BEFORE,
+                        false);
+                    DrawButtonChip(memDC, g_timerPrefixAfterTntRect, "After [IT]",
+                        NormalizePrefixTntTagPlacement(g_guiTimerPrefixTntTagPlacement) ==
+                            PREFIX_TNT_TAG_PLACEMENT_AFTER,
+                        true);
+                }
                 DrawToggleSwitch(memDC, g_timerNametagToggleRect, g_guiTimerNametagEnabled);
                 DrawToggleSwitch(memDC, g_timerDefaultScoreboardToggleRect, g_guiTimerEditDefaultScoreboard && NormalizeTimerDecimalPlaces(g_guiTimerDecimalPlaces) > 0);
                 DrawToggleSwitch(memDC, g_timerCaptureToggleRect, g_guiTimerObsScreenshotsEnabled);
@@ -20833,6 +17880,25 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 DrawButtonChip(memDC, g_publicWinsSuffixRect, "Suffix",
                     g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_SUFFIX, true);
 
+                if (g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_PREFIX) {
+                    SelectObject(memDC, metaFont);
+                    DrawTextLine(memDC, MakeRectWH(
+                        g_publicHelpersCard.left + 18,
+                        g_publicWinsPrefixBeforeTntRect.top + 7,
+                        150,
+                        16), "Prefix relative to [IT]", kGuiMuted,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    SelectObject(memDC, bodyFont);
+                    DrawButtonChip(memDC, g_publicWinsPrefixBeforeTntRect, "Before [IT]",
+                        NormalizePrefixTntTagPlacement(g_guiPublicWinsPrefixTntTagPlacement) ==
+                            PREFIX_TNT_TAG_PLACEMENT_BEFORE,
+                        false);
+                    DrawButtonChip(memDC, g_publicWinsPrefixAfterTntRect, "After [IT]",
+                        NormalizePrefixTntTagPlacement(g_guiPublicWinsPrefixTntTagPlacement) ==
+                            PREFIX_TNT_TAG_PLACEMENT_AFTER,
+                        true);
+                }
+
                 SelectObject(memDC, bodyFont);
                 DrawTextLine(memDC, MakeRectWH(g_publicHelpersCard.left + 18, g_publicWinsSpaceRect.top + 1,
                     g_publicHelpersCard.right - g_publicHelpersCard.left - 82, 20),
@@ -20868,7 +17934,7 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 IntersectClipRect(memDC, g_mutedUtilitiesCard.left + 2, g_mutedUtilitiesCard.top + kGuiCardHeaderHeight, g_mutedUtilitiesCard.right - 2, g_mutedUtilitiesCard.bottom - 2);
 
                 SelectObject(memDC, bodyFont);
-                DrawTextLine(memDC, MakeRectWH(g_mutedUtilitiesCard.left + 18, g_mutedVoiceToggleRect.top - 2, g_mutedUtilitiesCard.right - g_mutedUtilitiesCard.left - 100, 20), "Muted Voice - " + mutedVoice.status, kGuiText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                DrawTextLine(memDC, MakeRectWH(g_mutedUtilitiesCard.left + 18, g_mutedVoiceToggleRect.top - 2, g_mutedUtilitiesCard.right - g_mutedUtilitiesCard.left - 100, 20), "Muted Voice: " + mutedVoice.status, kGuiText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 DrawTextLine(memDC, MakeRectWH(g_mutedUtilitiesCard.left + 18, g_mutedVoiceHideMuteReminderToggleRect.top - 2, g_mutedUtilitiesCard.right - g_mutedUtilitiesCard.left - 100, 20), "Hide mute reminders", g_guiExtrasMutedVoice ? kGuiText : kGuiMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 DrawToggleSwitch(memDC, g_mutedVoiceToggleRect, g_guiExtrasMutedVoice);
                 DrawToggleSwitch(memDC, g_mutedVoiceHideMuteReminderToggleRect, g_guiExtrasMutedVoice && g_guiExtrasMutedVoiceHideMuteReminder);
@@ -20879,9 +17945,9 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 DrawTextInputField(memDC, g_mutedVoicePartyOwnerFieldRect, g_guiMutedVoicePartyOwner, "Any account", g_guiMutedVoicePartyOwnerEditing);
 
                 SelectObject(memDC, metaFont);
-                std::string mutedDetail = mutedVoice.detail.empty() ? "No active sign-in prompt" : mutedVoice.detail;
+                std::string mutedDetail = mutedVoice.detail.empty() ? "No active sign in prompt" : mutedVoice.detail;
                 DrawTextLine(memDC, MakeRectWH(g_mutedUtilitiesCard.left + 18, g_mutedUtilitiesCard.top + 196, g_mutedUtilitiesCard.right - g_mutedUtilitiesCard.left - 36, 18), mutedDetail, mutedVoice.detail.empty() ? kGuiMuted : kGuiText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                DrawTextLine(memDC, MakeRectWH(g_mutedUtilitiesCard.left + 18, g_mutedUtilitiesCard.top + 216, 180, 16), "Microsoft sign-in code", kGuiMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextLine(memDC, MakeRectWH(g_mutedUtilitiesCard.left + 18, g_mutedUtilitiesCard.top + 216, 180, 16), "Microsoft sign in code", kGuiMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
                 SelectObject(memDC, sectionFont);
                 std::string authCodeText = mutedVoice.authCode.empty() ? "No Code" : mutedVoice.authCode;
@@ -20890,7 +17956,7 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
                 SelectObject(memDC, metaFont);
                 std::string authMessage = mutedVoice.authMessage.empty()
-                    ? (mutedVoice.authUrl.empty() ? "No sign-in link" : mutedVoice.authUrl)
+                    ? (mutedVoice.authUrl.empty() ? "No sign in link" : mutedVoice.authUrl)
                     : mutedVoice.authMessage;
                 DrawTextLine(memDC, MakeRectWH(g_mutedUtilitiesCard.left + 18, g_mutedUtilitiesCard.top + 280, g_mutedUtilitiesCard.right - g_mutedUtilitiesCard.left - 36, 18), authMessage, mutedVoice.authUrl.empty() ? kGuiMuted : kGuiText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 if (!mutedVoice.authUrl.empty()) {
@@ -21181,6 +18247,24 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             RequestGuiRepaint();
             return 0;
         }
+        if (g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_PREFIX &&
+            PointInVisibleCardRect(
+                g_publicHelpersCard, g_publicWinsPrefixBeforeTntRect, x, y)) {
+            g_guiBindCapture = GUI_BIND_NONE;
+            g_guiPublicWinsPrefixTntTagPlacement = PREFIX_TNT_TAG_PLACEMENT_BEFORE;
+            SaveToolSettings();
+            RequestGuiRepaint();
+            return 0;
+        }
+        if (g_guiPublicWinsPosition == PUBLIC_WINS_POSITION_PREFIX &&
+            PointInVisibleCardRect(
+                g_publicHelpersCard, g_publicWinsPrefixAfterTntRect, x, y)) {
+            g_guiBindCapture = GUI_BIND_NONE;
+            g_guiPublicWinsPrefixTntTagPlacement = PREFIX_TNT_TAG_PLACEMENT_AFTER;
+            SaveToolSettings();
+            RequestGuiRepaint();
+            return 0;
+        }
         if (PointInVisibleCardRect(g_publicHelpersCard, g_publicWinsSpaceRect, x, y)) {
             g_guiBindCapture = GUI_BIND_NONE;
             g_guiPublicWinsSpaceBetweenUsername = !g_guiPublicWinsSpaceBetweenUsername;
@@ -21282,6 +18366,24 @@ LRESULT CALLBACK GuiWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (PointInVisibleCardRect(g_timerCard, g_timerNametagSuffixRect, x, y)) {
             g_guiTimerNametagPosition = TIMER_NAMETAG_POSITION_SUFFIX;
+            SaveToolSettings();
+            RequestGuiRepaint();
+            return 0;
+        }
+        if (NormalizeTimerNametagPosition(g_guiTimerNametagPosition) ==
+                TIMER_NAMETAG_POSITION_PREFIX &&
+            PointInVisibleCardRect(
+                g_timerCard, g_timerPrefixBeforeTntRect, x, y)) {
+            g_guiTimerPrefixTntTagPlacement = PREFIX_TNT_TAG_PLACEMENT_BEFORE;
+            SaveToolSettings();
+            RequestGuiRepaint();
+            return 0;
+        }
+        if (NormalizeTimerNametagPosition(g_guiTimerNametagPosition) ==
+                TIMER_NAMETAG_POSITION_PREFIX &&
+            PointInVisibleCardRect(
+                g_timerCard, g_timerPrefixAfterTntRect, x, y)) {
+            g_guiTimerPrefixTntTagPlacement = PREFIX_TNT_TAG_PLACEMENT_AFTER;
             SaveToolSettings();
             RequestGuiRepaint();
             return 0;
@@ -21855,6 +18957,7 @@ void RunLunarNametagTimerSmokeTest() {
 
     const bool previousNametagEnabled = g_guiTimerNametagEnabled;
     const int previousNametagPosition = g_guiTimerNametagPosition;
+    const int previousPrefixTntTagPlacement = g_guiTimerPrefixTntTagPlacement;
     const bool previousTimerActive = g_timerActive;
     const bool previousBetweenRounds = g_betweenRoundsTimerActive;
     const double previousTimerStartSeconds = g_timerStartSeconds;
@@ -21880,6 +18983,7 @@ void RunLunarNametagTimerSmokeTest() {
 
     g_guiTimerNametagEnabled = previousNametagEnabled;
     g_guiTimerNametagPosition = previousNametagPosition;
+    g_guiTimerPrefixTntTagPlacement = previousPrefixTntTagPlacement;
     g_timerActive = previousTimerActive;
     g_betweenRoundsTimerActive = previousBetweenRounds;
     g_timerStartSeconds = previousTimerStartSeconds;
@@ -22046,7 +19150,13 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
             ULONGLONG nowMs = GetTickCount64();
             bool inTntTagGame = false;
             bool inHypixelTntTagGame = false;
-            std::string timer = ReadExplosionTimer(&inTntTagGame, &inHypixelTntTagGame);
+            int scoreboardRoundNumber = -1;
+            std::string scoreboardMapName;
+            std::string timer = ReadExplosionTimer(
+                &inTntTagGame,
+                &inHypixelTntTagGame,
+                &scoreboardRoundNumber,
+                &scoreboardMapName);
             if (inTntTagGame) {
                 g_lastTntTagContextSeenMs = nowMs;
                 if (inHypixelTntTagGame) g_lastHypixelTntTagContextSeenMs = nowMs;
@@ -22070,11 +19180,27 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
             }
             InterlockedExchange(&g_tntTagGameActive, inTntTagGame ? 1 : 0);
             InterlockedExchange(&g_hypixelTntTagGameActive, inHypixelTntTagGame ? 1 : 0);
-            if (g_guiPublicWinsEnabled && inHypixelTntTagGame) {
-                EnsurePublicWinsTabNameHook(g_env);
-                EnsurePublicWinsApiTabHook(g_env);
-                EnsurePublicWinsScoreboardFormatHook(g_env);
-                EnsurePublicWinsRenderedNameHook(g_env);
+            if (inHypixelTntTagGame && !scoreboardMapName.empty() &&
+                scoreboardMapName != g_roundTimingMap) {
+                g_roundTimingMap = scoreboardMapName;
+                DebugLog("RoundTiming map observed map=%s", g_roundTimingMap.c_str());
+            }
+            if (!inHypixelTntTagGame && g_roundTimingActiveStartedMs != 0) {
+                DebugLog(
+                    "RoundTiming observation reset sequence=%d reason=left-hypixel-context",
+                    g_roundTimingSequence);
+                ResetCurrentRoundTimingObservation();
+            }
+            // Install once as soon as the feature is enabled. Every native
+            // decorator checks g_hypixelTntTagGameActive before changing text,
+            // so names stay untouched outside TNT Tag while the pre-game lobby
+            // no longer has a render-frame race during hook installation.
+            if (g_guiPublicWinsEnabled) {
+                if (IsLunarNamedClient()) {
+                    EnsurePublicWinsTabNameHook(g_env);
+                    EnsurePublicWinsScoreboardFormatHook(g_env);
+                    EnsurePublicWinsRenderedNameHook(g_env);
+                }
             }
             if (g_guiPublicWinsEnabled && inHypixelTntTagGame &&
                 (g_lastPublicWinsPrefetchMs == 0 || nowMs - g_lastPublicWinsPrefetchMs >= 1000)) {
@@ -22091,9 +19217,20 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
             std::string seconds = timer.empty() ? "" : ExtractSeconds(timer, colorCode);
             bool hasTimerNumber = !seconds.empty();
             int newSeconds = hasTimerNumber ? atoi(seconds.c_str()) : -1;
+            double rawCurrentRemaining = g_timerActive
+                ? GetRawDecimalSeconds()
+                : -1.0;
 
             if (inTntTagGame && hasTimerNumber && newSeconds > 0) {
                 bool phaseChanged = g_betweenRoundsTimerActive;
+                if (inHypixelTntTagGame) {
+                    RecordRoundTimingStartOrTick(
+                        nowMs,
+                        newSeconds,
+                        scoreboardRoundNumber,
+                        scoreboardMapName,
+                        phaseChanged);
+                }
                 g_betweenRoundsTimerActive = false;
                 g_betweenRoundsStartedAtMs = 0;
                 g_roundTimerObserved = true;
@@ -22119,16 +19256,24 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
 
                 if (inHypixelTntTagGame && g_roundTimerObserved && !g_betweenRoundsTimerActive &&
                     (reachedRoundEnd || disappearedNearRoundEnd)) {
+                    const char* roundEndTrigger = reachedRoundEnd
+                        ? "timer-zero"
+                        : "timer-missing-near-zero";
+                    RecordRoundTimingEnd(
+                        nowMs,
+                        rawCurrentRemaining,
+                        roundEndTrigger);
                     g_betweenRoundsTimerActive = true;
                     g_betweenRoundsStartedAtMs = nowMs;
-                    g_explosionSeconds = (int)std::ceil(kBetweenRoundTimerSeconds);
-                    g_timerStartSeconds = kBetweenRoundTimerSeconds;
+                    g_explosionSeconds = (int)std::ceil(g_betweenRoundDurationSeconds);
+                    g_timerStartSeconds = g_betweenRoundDurationSeconds;
                     g_explosionColorCode = '6';
                     QueryPerformanceCounter(&g_explosionSetAt);
                     g_timerActive = true;
-                    DebugLog("Between-round timer started duration=%.1f trigger=%s",
-                        kBetweenRoundTimerSeconds,
-                        reachedRoundEnd ? "timer-zero" : "timer-missing-near-zero");
+                    DebugLog("Between-round timer started duration=%.3f trigger=%s learnedSamples=%u",
+                        g_betweenRoundDurationSeconds,
+                        roundEndTrigger,
+                        (unsigned int)g_betweenRoundDurationSamples.size());
                 }
 
                 if (!inTntTagGame) {
@@ -22139,11 +19284,12 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
                     g_betweenRoundsStartedAtMs = 0;
                     g_roundTimerObserved = false;
                     g_lastRoundTimerSeenMs = 0;
+                    ResetCurrentRoundTimingObservation();
                 }
                 else if (g_betweenRoundsTimerActive) {
                     if (g_betweenRoundsStartedAtMs != 0 &&
                         (nowMs - g_betweenRoundsStartedAtMs) >=
-                        (ULONGLONG)(kBetweenRoundTimerSeconds * 1000.0)) {
+                        (ULONGLONG)(g_timerStartSeconds * 1000.0)) {
                         g_explosionSeconds = -1;
                         g_timerStartSeconds = -1.0;
                         g_timerActive = false;
@@ -22157,6 +19303,8 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
                 }
             }
 
+            const bool useBadlionPublicWinsNameCache = !IsLunarNamedClient() &&
+                g_guiPublicWinsEnabled && inHypixelTntTagGame;
             bool shouldShowNametagTimer = g_guiTimerNametagEnabled &&
                 g_timerActive && !g_betweenRoundsTimerActive;
             if (shouldShowNametagTimer) {
@@ -22202,17 +19350,40 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
                 g_lastDefaultScoreboardBetweenRounds = g_betweenRoundsTimerActive;
             }
 
-            // Wins are appended when vanilla formats the current scoreboard
-            // team name. Never move players out of Hypixel's live teams: those
-            // memberships carry the red TNT name and [IT] state.
-            if (!g_publicWinsTeamFormatCache.empty()) ApplyPublicWinsToPlayerTeams(false);
-            g_lastPublicWinsTeamUpdateMs = 0;
+            // Restore the pre-regression Badlion display path. Do not install
+            // the experimental Java name/crosshair transforms on this client.
+            if (useBadlionPublicWinsNameCache) {
+                if (g_lastPublicWinsTeamUpdateMs == 0 ||
+                    nowMs - g_lastPublicWinsTeamUpdateMs >= 100) {
+                    ApplyPublicWinsToPlayerNameCaches(true);
+                    ApplyPublicWinsToTabNameCaches(true);
+                    g_lastPublicWinsTeamUpdateMs = nowMs;
+                }
+            }
+            else {
+                if (!g_publicWinsCachedPlayerNames.empty()) {
+                    ApplyPublicWinsToPlayerNameCaches(false);
+                }
+                if (!g_publicWinsCachedTabNames.empty()) {
+                    ApplyPublicWinsToTabNameCaches(false);
+                }
+                if (!g_publicWinsTeamFormatCache.empty()) ApplyPublicWinsToPlayerTeams(false);
+                g_lastPublicWinsTeamUpdateMs = 0;
+            }
 
             PollSpeedSlownessChatAlerts(g_guiSpeedSlownessEnabled);
             FlushMutedVoiceLocalChatQueue(g_env);
         }
         Sleep(1);
     }
+
+    DebugLog(
+        "RoundTiming summary sequences=%d endLeadMs=%d endSamples=%u intermissionMs=%d intermissionSamples=%u",
+        g_roundTimingSequence,
+        (int)std::lround(g_roundEndLeadSeconds * 1000.0),
+        (unsigned int)g_roundEndLeadSamples.size(),
+        (int)std::lround(g_betweenRoundDurationSeconds * 1000.0),
+        (unsigned int)g_betweenRoundDurationSamples.size());
 
     // Restore perspective if snaplook was active when unloading
     if (g_snaplookActive) {
@@ -22221,6 +19392,8 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
     }
     if (!g_teamSuffixCache.empty()) ApplyTimerToPlayerTeams(false);
     if (!g_scoreboardTimerLineCache.empty()) ApplyDefaultScoreboardTimerEdit(false);
+    if (!g_publicWinsCachedPlayerNames.empty()) ApplyPublicWinsToPlayerNameCaches(false);
+    if (!g_publicWinsCachedTabNames.empty()) ApplyPublicWinsToTabNameCaches(false);
     if (!g_publicWinsTeamFormatCache.empty()) ApplyPublicWinsToPlayerTeams(false);
     RestoreStoredTagScoreboardVisibility();
     if (g_tntVisualJNI.wheatApplied || g_tntVisualJNI.beaconApplied) {
@@ -22232,10 +19405,14 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
         }
     }
     RestorePublicWinsTabNameHook(g_env);
-    StopPublicWinsWorker();
+    // Joining is mandatory at unload, even when a request outlasts the normal
+    // UI timeout. Keep the DLL mapped if a wait fails for any reason.
+    bool publicWinsStopped = StopPublicWinsWorker(INFINITE);
     ShutdownMutedVoicePacketFilter();
     ShutdownInjectedJavaCallbacks();
-    StopMutedVoiceWorker();
+    bool mutedVoiceStopped = StopMutedVoiceWorker(INFINITE);
+    bool signOutStopped = JoinMutedVoiceSignOutThread();
+    bool blendPointersRestored = RestoreBlendFuncSeparatePatches(g_env);
 
     // Redefined methods already executing on a render/network thread can remain
     // as obsolete frames briefly. Give them time to return after unregistering
@@ -22255,15 +19432,41 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
     DebugLog("MainThread shutdown complete restoring previous exception filter=%p", g_prevUnhandledExceptionFilter);
     ReleaseSpeedTransitionDiagnosticJNI();
     if (g_jvm) g_jvm->DetachCurrentThread();
+    if (!publicWinsStopped || !mutedVoiceStopped || !signOutStopped || !blendPointersRestored) {
+        DebugLog("DLL retained: worker shutdown or crosshair pointer restoration was not confirmed");
+        return 0;
+    }
     FreeLibraryAndExitThread((HMODULE)lpParam, 0);
     return 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
+        // Each launcher run stages a new filename. Reject a second copy before
+        // it can install competing hooks into the same Minecraft process.
+        wchar_t mutexName[96] = {};
+        swprintf_s(mutexName, L"Local\\TagEssentials_Mod_%lu", GetCurrentProcessId());
+        g_moduleInstanceMutex = CreateMutexW(nullptr, FALSE, mutexName);
+        DWORD mutexError = GetLastError();
+        if (!g_moduleInstanceMutex) return FALSE;
+        if (mutexError == ERROR_ALREADY_EXISTS) {
+            CloseHandle(g_moduleInstanceMutex);
+            g_moduleInstanceMutex = nullptr;
+            return FALSE;
+        }
         g_moduleHandle = hinstDLL;
         DisableThreadLibraryCalls(hinstDLL);
-        CreateThread(nullptr, 0, MainThread, hinstDLL, 0, nullptr);
+        HANDLE mainThread = CreateThread(nullptr, 0, MainThread, hinstDLL, 0, nullptr);
+        if (!mainThread) {
+            CloseHandle(g_moduleInstanceMutex);
+            g_moduleInstanceMutex = nullptr;
+            return FALSE;
+        }
+        CloseHandle(mainThread);
+    }
+    else if (fdwReason == DLL_PROCESS_DETACH && g_moduleInstanceMutex) {
+        CloseHandle(g_moduleInstanceMutex);
+        g_moduleInstanceMutex = nullptr;
     }
     return TRUE;
 }

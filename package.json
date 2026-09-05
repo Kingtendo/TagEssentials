@@ -2,15 +2,16 @@
   "name": "tagessentials",
   "version": "0.1.0",
   "private": true,
-  "description": "Optional Node.js runtime for the TagEssentials muted-voice helper.",
+  "description": "Optional Node.js runtime for the TagEssentials muted voice helper.",
   "license": "MIT",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "check:bot": "node --check mutedVoiceBot.js",
+    "test:bot": "node --test test/mutedVoiceBot.test.js",
     "test:server": "node --test public-helpers-server/test/server.test.js",
-    "test": "npm run check:bot && npm run test:server"
+    "test": "npm run check:bot && npm run test:bot && npm run test:server"
   },
   "dependencies": {
     "mineflayer": "4.37.1"

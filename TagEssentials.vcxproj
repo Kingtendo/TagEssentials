@@ -98,6 +98,9 @@
     <None Include="mutedVoiceBot.js">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="public_helpers_server.txt" Condition="Exists('$(ProjectDir)public_helpers_server.txt')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TagEssentials.rc">

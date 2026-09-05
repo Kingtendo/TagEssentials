@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Shared, privacy-preserving Hypixel TNT Tag wins cache for TagEssentials.",
+  "description": "Shared, privacy preserving Hypixel TNT Tag wins cache for TagEssentials.",
   "scripts": {
     "start": "node server.js",
     "test": "node --test"

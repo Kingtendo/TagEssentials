@@ -157,6 +157,10 @@ export class PersistentWinsCache {
         const directory = path.dirname(this.file);
         const temporary = `${this.file}.tmp`;
         await fs.mkdir(directory, { recursive: true });
+        const now = this.now();
+        for (const [uuid, entry] of this.entries) {
+          if (now - entry.fetchedAt > this.staleTtlMs) this.entries.delete(uuid);
+        }
         const entries = [...this.entries.entries()].map(([uuid, entry]) => ({ uuid, ...entry }));
         await fs.writeFile(temporary, `${JSON.stringify({ version: 1, entries })}\n`, { mode: 0o600 });
         await fs.rename(temporary, this.file);
@@ -171,26 +175,40 @@ export class PersistentWinsCache {
 }
 
 export class WinsService {
-  constructor({ apiKey, cache, budget, fetchImpl = fetch, cacheTtlMs, staleTtlMs, now = () => Date.now() }) {
+  constructor({
+    apiKey,
+    cache,
+    budget,
+    fetchImpl = fetch,
+    identityFetchImpl = fetch,
+    cacheTtlMs,
+    staleTtlMs,
+    now = () => Date.now()
+  }) {
     this.apiKey = apiKey;
     this.cache = cache;
     this.budget = budget;
     this.fetchImpl = fetchImpl;
+    this.identityFetchImpl = identityFetchImpl;
     this.cacheTtlMs = cacheTtlMs;
     this.staleTtlMs = staleTtlMs;
     this.now = now;
     this.inFlight = new Map();
+    this.identityInFlight = new Map();
+    this.identityCache = new Map();
+    this.identityCacheTtlMs = Math.min(cacheTtlMs, 5 * 60 * 1000);
     this.upstreamStatus = 'not_checked';
     this.lastUpstreamSuccessAt = 0;
   }
 
-  resultForName(entry, playerName, cacheStatus, retryAfterMs = 0) {
+  resultForName(entry, playerName, cacheStatus, retryAfterMs = 0, nicked = false) {
     const matches = entry.available && entry.displayName.toLowerCase() === playerName.toLowerCase();
     return {
       status: 200,
       body: {
         ok: true,
         available: matches,
+        nicked,
         ...(matches ? { wins: entry.wins } : {}),
         fetched_at: entry.fetchedAt,
         cache_status: cacheStatus,
@@ -202,13 +220,30 @@ export class WinsService {
   async lookup(uuid, playerName) {
     const now = this.now();
     const cached = this.cache.get(uuid);
-    if (cached && now - cached.fetchedAt < this.cacheTtlMs) return this.resultForName(cached, playerName, 'hit');
+    const cachedCanBeServedWithoutIdentityRisk = cached?.available &&
+      cached.displayName.toLowerCase() === playerName.toLowerCase();
+    if (cached && now - cached.fetchedAt < this.cacheTtlMs) {
+      if (cachedCanBeServedWithoutIdentityRisk) {
+        return this.resultForName(cached, playerName, 'hit');
+      }
+
+      const identity = await this.confirmMinecraftIdentity(uuid, playerName);
+      if (!identity.confirmed) return this.identityConfirmationUnavailable();
+      if (identity.nicked || !cached.available) {
+        return this.resultForName(cached, playerName, 'hit', 0, identity.nicked);
+      }
+      // Minecraft confirms the visible identity while the cached Hypixel name
+      // differs, which can happen around a legitimate name change. Refresh
+      // Hypixel before returning wins and never label this state as nicked.
+    }
 
     let pending = this.inFlight.get(uuid);
     if (!pending) {
       const reservation = this.budget.reserve();
       if (!reservation.allowed) {
-        if (cached) return this.resultForName(cached, playerName, 'stale', reservation.retryAfterMs);
+        if (cached && cachedCanBeServedWithoutIdentityRisk) {
+          return this.resultForName(cached, playerName, 'stale', reservation.retryAfterMs);
+        }
         return {
           status: 503,
           retryAfterMs: reservation.retryAfterMs,
@@ -221,16 +256,99 @@ export class WinsService {
 
     try {
       const fresh = await pending;
-      return this.resultForName(fresh, playerName, 'miss');
+      const matches = fresh.available &&
+        fresh.displayName.toLowerCase() === playerName.toLowerCase();
+      if (matches) return this.resultForName(fresh, playerName, 'miss');
+
+      // Hypixel can hide a nicked player's profile completely instead of
+      // returning the underlying profile name. Confirm either form against
+      // Minecraft's session profile before exposing the nicked state.
+      const identity = await this.confirmMinecraftIdentity(uuid, playerName);
+      if (!identity.confirmed) return this.identityConfirmationUnavailable();
+      return this.resultForName(fresh, playerName, 'miss', 0, identity.nicked);
     } catch (error) {
       const retryAfterMs = Math.max(2000, Number(error?.retryAfterMs) || 120000);
-      if (cached) return this.resultForName(cached, playerName, 'stale', retryAfterMs);
+      if (cached && cachedCanBeServedWithoutIdentityRisk) {
+        return this.resultForName(cached, playerName, 'stale', retryAfterMs);
+      }
       return {
         status: error?.forbidden ? 503 : 502,
         retryAfterMs,
         body: { ok: false, error: error?.publicCode || 'upstream_unavailable', retry_after_seconds: Math.ceil(retryAfterMs / 1000) }
       };
     }
+  }
+
+  identityConfirmationUnavailable() {
+    return {
+      status: 502,
+      retryAfterMs: 120000,
+      body: { ok: false, error: 'identity_confirmation_unavailable', retry_after_seconds: 120 }
+    };
+  }
+
+  async confirmMinecraftIdentity(uuid, playerName) {
+    const now = this.now();
+    let identity = this.identityCache.get(uuid);
+    if (!identity || now - identity.checkedAt >= this.identityCacheTtlMs) {
+      let pending = this.identityInFlight.get(uuid);
+      if (!pending) {
+        pending = this.fetchMinecraftIdentity(uuid)
+          .finally(() => this.identityInFlight.delete(uuid));
+        this.identityInFlight.set(uuid, pending);
+      }
+      identity = await pending;
+      if (identity.confirmed) {
+        identity = { ...identity, checkedAt: this.now() };
+        this.identityCache.set(uuid, identity);
+        if (this.identityCache.size > 10000) {
+          const cutoff = this.now() - this.identityCacheTtlMs;
+          for (const [candidate, cachedIdentity] of this.identityCache) {
+            if (cachedIdentity.checkedAt <= cutoff) this.identityCache.delete(candidate);
+          }
+        }
+      }
+    }
+    if (!identity.confirmed) return { confirmed: false, nicked: false };
+    return {
+      confirmed: true,
+      nicked: identity.profileName === null ||
+        identity.profileName.toLowerCase() !== playerName.toLowerCase()
+    };
+  }
+
+  async fetchMinecraftIdentity(uuid) {
+    let response;
+    try {
+      response = await this.identityFetchImpl(
+        `https://sessionserver.mojang.com/session/minecraft/profile/${uuid}`,
+        {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(8000)
+        }
+      );
+    } catch {
+      return { confirmed: false, profileName: null };
+    }
+
+    // The session service uses 204 when the UUID is synthetic and has no
+    // Minecraft account behind it. In an authenticated Hypixel player list,
+    // that is a definitive nick signature.
+    if (response.status === 204) return { confirmed: true, profileName: null };
+    if (!response.ok) return { confirmed: false, profileName: null };
+
+    let profile;
+    try {
+      profile = await response.json();
+    } catch {
+      return { confirmed: false, profileName: null };
+    }
+    const profileUuid = normalizeUuid(profile?.id);
+    const profileName = String(profile?.name ?? '');
+    if (profileUuid !== uuid || !isMinecraftUsername(profileName)) {
+      return { confirmed: false, profileName: null };
+    }
+    return { confirmed: true, profileName };
   }
 
   async fetchPlayer(uuid) {
@@ -335,7 +453,10 @@ export function createRequestHandler({ service, clientToken, clientLimiter, glob
     const forwarded = trustProxy ? String(request.headers['x-forwarded-for'] ?? '').split(',')[0].trim() : '';
     const clientIp = forwarded || request.socket.remoteAddress || 'unknown';
     const clientLimit = clientLimiter.take(clientIp);
-    const globalLimit = globalLimiter.take('global');
+    // Requests already rejected for one client must not exhaust everyone else's budget.
+    const globalLimit = clientLimit.allowed
+      ? globalLimiter.take('global')
+      : { allowed: true, retryAfterMs: 0 };
     const retryAfterMs = Math.max(clientLimit.retryAfterMs, globalLimit.retryAfterMs);
     if (!clientLimit.allowed || !globalLimit.allowed) {
       jsonResponse(response, 429, {
@@ -368,7 +489,7 @@ export async function startServer() {
 
   const port = envInteger('PORT', 8080, 1, 65535);
   const host = String(process.env.HOST ?? '127.0.0.1');
-  const cacheTtlMs = envInteger('CACHE_TTL_MS', 3600000, 3600000, 604800000);
+  const cacheTtlMs = envInteger('CACHE_TTL_MS', 1800000, 1800000, 604800000);
   const staleTtlMs = envInteger('STALE_TTL_MS', 86400000, cacheTtlMs, 2592000000);
   const rateWindowMs = envInteger('RATE_WINDOW_MS', 300000, 60000, 3600000);
   const cacheFile = String(process.env.CACHE_FILE ?? '/data/tnttag-wins-cache.json');
