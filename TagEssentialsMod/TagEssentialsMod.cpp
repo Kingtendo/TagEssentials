@@ -1775,7 +1775,13 @@ PublicWinsCachedResult GetPublicWinsCachedByPlayerName(
     return newest->nicked ? PUBLIC_WINS_CACHED_NICKED : PUBLIC_WINS_CACHED_NONE;
 }
 
-bool ResolveNodeExecutable(std::string& nodePath) {
+bool ResolveNodeExecutable(const std::string& runtimeDir, std::string& nodePath) {
+    std::string bundledNodePath = JoinPathA(runtimeDir, "node.exe");
+    if (FileExistsA(bundledNodePath)) {
+        nodePath = bundledNodePath;
+        return true;
+    }
+
     char found[MAX_PATH] = {};
     DWORD length = SearchPathA(nullptr, "node.exe", nullptr, MAX_PATH, found, nullptr);
     if (length == 0 || length >= MAX_PATH) return false;
@@ -2348,14 +2354,14 @@ DWORD WINAPI MutedVoiceWorkerThread(LPVOID) {
     std::string scriptPath;
     std::string nodePath;
 
-    if (!ResolveNodeExecutable(nodePath)) {
-        SetMutedVoiceStatus(MUTED_VOICE_STATUS_ERROR, "Node.js not found");
+    if (!ResolveMutedVoiceRuntime(workingDir, scriptPath)) {
+        SetMutedVoiceStatus(MUTED_VOICE_STATUS_ERROR, "mutedVoiceBot.js not found");
         keepErrorStatus = true;
         goto cleanup;
     }
 
-    if (!ResolveMutedVoiceRuntime(workingDir, scriptPath)) {
-        SetMutedVoiceStatus(MUTED_VOICE_STATUS_ERROR, "mutedVoiceBot.js not found");
+    if (!ResolveNodeExecutable(workingDir, nodePath)) {
+        SetMutedVoiceStatus(MUTED_VOICE_STATUS_ERROR, "Node.js runtime not found");
         keepErrorStatus = true;
         goto cleanup;
     }

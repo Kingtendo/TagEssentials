@@ -1,28 +1,26 @@
 TAGESSENTIALS : WINDOWS X64
 ==========================
 
-1. Extract the entire ZIP to a normal folder. Do not run the EXE from the ZIP.
-2. Start Badlion Client or Lunar Client with Minecraft 1.8.9 (64 bit).
-3. Run TagEssentials.exe. Windows may ask for administrator permission.
+1. Start Badlion Client or Lunar Client with Minecraft 1.8.9 (64 bit).
+2. Run TagEssentials.exe. Windows may ask for administrator permission.
 
-The injected module is embedded in the EXE; no separate DLL is required.
+The injected module and the optional muted voice runtime are embedded in this
+single EXE. No separate DLL, Node.js install, npm install, or runtime folder is
+required. The first start unpacks private support files to the local TagEssentials
+application data folder.
 
-OPTIONAL: MUTED VOICE
+OPTIONAL MUTED VOICE
 
-Install Node.js 22 or newer, open a terminal in this folder, and run:
+The muted voice helper is included in the single EXE. On first use it creates
+mutedVoiceBot.config.json and opens it so the Minecraft username can be entered.
+Microsoft sign in data is stored locally in the private TagEssentials application
+data folder and is never meant to be committed or shared.
 
-    npm ci --omit=dev
+OPTIONAL PUBLIC HELPERS
 
-Keep mutedVoiceBot.js, package.json, package-lock.json, and the generated
-node_modules folder beside TagEssentials.exe. Microsoft sign in data is stored
-locally in .mineflayer-auth and is never meant to be committed or shared.
-
-OPTIONAL: PUBLIC HELPERS
-
-The wins in username feature requires public_helpers_server.txt beside the EXE.
-That file contains the hosted service URL and client token. It is intentionally
-not included in public source builds. See public_helpers_server.example.txt and
-public-helpers-server/README.md in the source repository.
+Maintainer builds include the Public Helpers client configuration when a valid
+local public_helpers_server.txt is present during the build. Source builds need
+that ignored file beside the EXE if the wins in username feature is wanted.
 
 SECURITY AND COMPATIBILITY
 

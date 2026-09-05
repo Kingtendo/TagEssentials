@@ -62,7 +62,7 @@
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>EMBEDDED_DLL_PATH="$(ProjectDir)x64\Debug\TagEssentialsMod.dll";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>EMBEDDED_DLL_PATH="$(ProjectDir)x64\Debug\TagEssentialsMod.dll";EMBEDDED_RUNTIME_BUNDLE="$(ProjectDir)build\mutedVoiceRuntime.bundle";EMBEDDED_RUNTIME_VERSION="$(ProjectDir)build\mutedVoiceRuntime.version";EMBEDDED_PUBLIC_HELPERS="$(ProjectDir)build\public_helpers_server.txt";%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -81,7 +81,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>EMBEDDED_DLL_PATH="$(ProjectDir)x64\Release\TagEssentialsMod.dll";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>EMBEDDED_DLL_PATH="$(ProjectDir)x64\Release\TagEssentialsMod.dll";EMBEDDED_RUNTIME_BUNDLE="$(ProjectDir)build\mutedVoiceRuntime.bundle";EMBEDDED_RUNTIME_VERSION="$(ProjectDir)build\mutedVoiceRuntime.version";EMBEDDED_PUBLIC_HELPERS="$(ProjectDir)build\public_helpers_server.txt";%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -107,6 +107,7 @@
       <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)TagEssentials.ico;$(ProjectDir)x64\Debug\TagEssentialsMod.dll;%(AdditionalInputs)</AdditionalInputs>
       <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)TagEssentials.ico;$(ProjectDir)x64\Release\TagEssentialsMod.dll;%(AdditionalInputs)</AdditionalInputs>
     </ResourceCompile>
+    <ResourceCompile Include="build\embedded_runtime.rc" Condition="Exists('$(ProjectDir)build\embedded_runtime.rc')" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include=".\TagEssentialsMod\TagEssentialsMod.vcxproj">

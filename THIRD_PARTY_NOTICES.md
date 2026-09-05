@@ -6,6 +6,9 @@ TagEssentials includes or uses the following third party components:
   its BSD style license in `third_party/minhook/LICENSE.txt`.
 * Mineflayer 4.37.1 and its npm dependencies. Mineflayer is MIT licensed; npm
   installs its transitive dependencies and their accompanying license data.
+* Node.js 22.23.2 is embedded in maintainer executables. Node.js is distributed
+  under the license and notice included as `NODE_LICENSE.txt` in the unpacked
+  private runtime.
 * `third_party/mcp/1.8.9/` contains Minecraft Coder Pack 1.8.9 SRG data and
   stable_22 names used to create `TagEssentialsMod/LunarMappings.generated.h`.
   The inputs and altered generated table are distributed under the modified

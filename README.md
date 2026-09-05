@@ -38,7 +38,9 @@ through the [PrimeTag Discord](https://discord.gg/primetag).
 * Badlion Client or Lunar Client running Minecraft 1.8.9.
 * Visual Studio 2022 with **Desktop development with C++** to build.
 * A JDK with `JAVA_HOME` set (Temurin 21 is used by CI).
-* Node.js 22 or newer for the optional muted voice helper and server tests.
+* Node.js 22 or newer for the optional muted voice helper tests. The standalone
+  release script downloads a pinned Node.js runtime when a suitable local version
+  is not available.
 
 Client updates can change obfuscated classes and break compatibility. A build
 succeeding does not prove that every hook still works against a newly updated
@@ -56,26 +58,28 @@ msbuild .\TagEssentials.sln /m /p:Configuration=Release /p:Platform=x64
 ```
 
 Run the command from a Visual Studio 2022 Developer PowerShell so `msbuild` is
-available. Node.js is not required for the native launcher or mod build.
+available. This creates a source build of the native launcher. Its optional muted
+voice helper still uses Node.js from the system PATH.
 
 The launcher is written to `x64\Release\TagEssentials.exe`; the injected module
 is embedded in it as a resource. The build vendors MinHook source so no opaque
 precompiled hooking library is required.
 
-To create the distributable ZIP:
+To create the single file maintainer release:
 
 ```powershell
 .\build-release.ps1
 ```
 
-The archive is created at `build\TagEssentials-windows-x64.zip`. The optional
-Public Helpers client configuration is included only when a valid ignored
-`public_helpers_server.txt` exists locally.
+The executable is created at `build\TagEssentials.exe`. The build embeds the
+native module, Node.js, Mineflayer, and all production npm dependencies. The
+generated EXE is ignored by Git. The optional Public Helpers client configuration
+is embedded only when a valid ignored `public_helpers_server.txt` exists locally.
 
 ## Optional muted voice helper
 
-The build output directory contains `mutedVoiceBot.js`. Install its pinned runtime
-dependency in that directory before enabling the feature:
+For a normal source build, the build output directory contains `mutedVoiceBot.js`.
+Install its pinned runtime dependency in that directory before enabling the feature:
 
 ```powershell
 npm ci --omit=dev
@@ -83,6 +87,7 @@ npm ci --omit=dev
 
 Authentication data is written to `.mineflayer-auth` and configuration to
 `mutedVoiceBot.config.json`. Both are ignored by Git and must remain private.
+The standalone maintainer build handles this runtime setup automatically.
 
 ## Optional Public Helpers backend
 
