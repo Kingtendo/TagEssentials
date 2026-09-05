@@ -24,9 +24,9 @@ through the [PrimeTag Discord](https://discord.gg/primetag).
 - Sound alerts for Speed III and Slowness transitions.
 - Snaplook support on Badlion (Lunar already provides its own implementation).
 - TNT Tag visual options such as wheat-stage and beacon-beam overrides.
-- Optional wins labels through the privacy-limited Public Helpers backend.
-- Optional Mineflayer-based muted-voice helper with Microsoft authentication.
-- Multiple animated GUI themes and per-number timer colours.
+- Optional wins labels through the privacy limited Public Helpers backend.
+- Optional Mineflayer based muted voice helper with Microsoft authentication.
+- Multiple animated GUI themes and per number timer colours.
 - Clean unload from the window close action or the End key.
 
 ## Supported environment
