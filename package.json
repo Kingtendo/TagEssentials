@@ -14,7 +14,7 @@
     "test": "npm run check:bot && npm run test:bot && npm run test:server"
   },
   "dependencies": {
-    "mineflayer": "4.37.1"
+    "mineflayer": "4.38.0"
   },
   "overrides": {
     "uuid": "11.1.1"
